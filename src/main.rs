@@ -1,28 +1,19 @@
-use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
-use chrono::NaiveDate;
-use serde::{Deserialize, Serialize};
+mod constants;
+mod models;
+mod utils;
 
-/// Request body definitions 
+use actix_web::{App, HttpResponse, HttpServer, Responder, Result, get, post, web};
+use std::collections::HashSet;
+use std::fs;
+use std::path::Path;
+use std::sync::atomic::AtomicI32;
+use std::sync::atomic::Ordering::Relaxed;
+use tokio::sync::Mutex;
+use uuid::Uuid;
 
-#[derive(Deserialize, Serialize)]
-struct NewClientBody {
-    client_name: String,
-    birth_date: NaiveDate,
-    document_number: String,
-    country: String,
-}
+use models::{Cache, Client, NewClientBody, NewCreditTransactionBody, NewDebitTransactionBody};
 
-#[derive(Deserialize, Serialize)]
-struct NewCreditTransactionBody {
-    client_id: i32,
-    credit_amount: f64,
-}
-
-#[derive(Deserialize, Serialize)]
-struct NewDebitTransactionBody {
-    client_id: i32,
-    debit_amount: f64,
-}
+use crate::utils::bootstrap;
 
 /// Endpoints 
 
@@ -40,14 +31,32 @@ async fn index() -> impl Responder {
 }
 
 #[post("/new_client")]
-async fn new_client(req_body: web::Json<NewClientBody>) -> impl Responder {
-    let body = &req_body.into_inner();
-    let response_string = format!(
-        "Received new client request for {} with document numer {}",
-        body.client_name, body.document_number
-    );
-    let response = &response_string;
-    HttpResponse::Ok().json(response)
+async fn new_client(
+    req_body: web::Json<NewClientBody>,
+    cache: web::Data<Cache>,
+) -> Result<impl Responder> {
+    let body = req_body.into_inner();
+
+    // Generate a unique client id
+    let client_id = Uuid::now_v7();
+
+    // New Client
+    let new_client = Client {
+        client_id,
+        client_name: body.client_name,
+        country: body.country,
+        document_number: body.document_number,
+        birth_date: body.birth_date,
+        balance: 0f64,
+    };
+
+    // Insert the new client in the cache and save it to storage
+    cache.insert_client(new_client).await.map_err(|e| {
+        actix_web::error::ErrorInternalServerError(format!("Error inserting client: {e}"))
+    })?;
+
+    // Return the client id
+    Ok(HttpResponse::Ok().json(client_id.to_string()))
 }
 
 #[post("/new_credit_transaction")]
