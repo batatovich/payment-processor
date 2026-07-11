@@ -74,8 +74,22 @@ async fn client_balance() -> impl Responder {
 async fn main() -> std::io::Result<()> {
     println!("Starting server");
 
-    HttpServer::new(|| {
+    let (last_nonce, clients) = match bootstrap() {
+        Ok((nonce, clients)) => (nonce, clients),
+        Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+    };
+
+    // Initialize cache
+    let cache = web::Data::new(Cache {
+        in_flight: Mutex::new(HashSet::new()),
+        clients: Mutex::new(clients),
+        transactions: Mutex::new(vec![]),
+        nonce: AtomicI32::new(last_nonce),
+    });
+
+    HttpServer::new(move || {
         App::new()
+            .app_data(cache.clone())
             .service(index)
             .service(new_client)
             .service(new_debit_transaction)
@@ -83,7 +97,7 @@ async fn main() -> std::io::Result<()> {
             .service(store_balances)
             .service(client_balance)
     })
-    .bind(("127.0.0.1", 8081))?
+    .bind(("127.0.0.1", 8080))?
     .run()
     .await
 }
