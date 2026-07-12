@@ -5,6 +5,8 @@ use std::sync::atomic::AtomicI32;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+type Document = String;
+
 // Whitelisted countries
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum Country {
@@ -22,7 +24,7 @@ pub enum Country {
 pub struct NewClientBody {
     pub client_name: String,
     pub birth_date: NaiveDate,
-    pub document_number: String,
+    pub document_number: Document,
     pub country: Country,
 }
 
@@ -44,7 +46,7 @@ pub struct Client {
     pub client_id: Uuid,
     pub client_name: String,
     pub country: Country,
-    pub document_number: String,
+    pub document_number: Document,
     pub birth_date: NaiveDate,
     pub balance: f64,
 }
