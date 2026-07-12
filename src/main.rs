@@ -41,14 +41,9 @@ async fn new_client(
     let client_id = Uuid::now_v7();
 
     // New Client
-    let new_client = Client {
-        client_id,
-        client_name: body.client_name,
-        country: body.country,
-        document_number: body.document_number,
-        birth_date: body.birth_date,
-        balance: 0f64,
-    };
+    let new_client = Client::new(body);
+
+    let new_client_id = new_client.client_id.clone();
 
     // Insert the new client in the cache and save it to storage
     cache.insert_client(new_client).await.map_err(|e| {
