@@ -84,7 +84,6 @@ async fn main() -> std::io::Result<()> {
     let cache = web::Data::new(Cache {
         in_flight: Mutex::new(HashSet::new()),
         clients: Mutex::new(clients),
-        transactions: Mutex::new(vec![]),
         nonce: AtomicI32::new(last_nonce),
     });
 
