@@ -37,9 +37,6 @@ async fn new_client(
 ) -> Result<impl Responder> {
     let body = req_body.into_inner();
 
-    // Generate a unique client id
-    let client_id = Uuid::now_v7();
-
     // New Client
     let new_client = Client::new(body);
 
@@ -51,7 +48,7 @@ async fn new_client(
     })?;
 
     // Return the client id
-    Ok(HttpResponse::Ok().json(client_id.to_string()))
+    Ok(HttpResponse::Ok().json(new_client_id.to_string()))
 }
 
 #[post("/new_credit_transaction")]
