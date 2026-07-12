@@ -49,17 +49,23 @@ pub struct Client {
     pub balance: f64,
 }
 
-// Enum representing a debit or credit transaction.
-pub enum Transaction {
-    Credit(NewCreditTransactionBody),
-    Debit(NewDebitTransactionBody),
+impl Client {
+    pub fn new(body: NewClientBody) -> Self {
+        Self {
+            client_id: Uuid::now_v7(),
+            client_name: body.client_name,
+            country: body.country,
+            document_number: body.document_number,
+            birth_date: body.birth_date,
+            balance: 0f64,
+        }
+    }
 }
 
 // Shared App State
 pub struct Cache {
     pub in_flight: Mutex<HashSet<String>>,
     pub clients: Mutex<HashMap<String, Client>>,
-    pub transactions: Mutex<Vec<Transaction>>,
     pub nonce: AtomicI32,
 }
 
