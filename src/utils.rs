@@ -5,7 +5,8 @@ use std::fs;
 use std::path::Path;
 
 use crate::constants::{DATA_DIR, FILE_CLIENTS_METADATA, FILE_LAST_NONCE};
-use crate::models::Client;
+use crate::domain::cache::Cache;
+use crate::domain::client::{Client, Document};
 
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -41,7 +42,9 @@ pub async fn save_client_to_storage(client: &Client) -> Result<(), String> {
     Ok(())
 }
 
-pub fn bootstrap() -> Result<(i32, HashMap<String, Client>), String> {
+/// Boostraping function. It runs each time the server starts.
+/// It handles cache initialization and sanity checks.
+pub fn bootstrap() -> Result<Cache, String> {
     println!("🔍 Running system sanity checks...");
     let path = Path::new(DATA_DIR);
     let nonce_path = path.join(FILE_LAST_NONCE);
@@ -55,30 +58,43 @@ pub fn bootstrap() -> Result<(i32, HashMap<String, Client>), String> {
         .map_err(|e| format!("Failed to read {:?}: {e}", nonce_path))?
         .trim()
         .parse::<i32>()
-        .map_err(|_| "Invalid integer format inside .last_nonce".to_string())?;
+        .map_err(|_| "Invalid integer format reading last nonce from storage".to_string())?;
 
     // Nonce Sanity checks
     nonce_sanity_checks(path, last_nonce)?;
 
-    // 4. Hydrate in-memory cache map
-    let mut clients_cache = HashMap::new();
+    // Hydrate clients mapping
+    let mut clients_map = HashMap::new();
     let content = fs::read_to_string(&clients_path)
-        .map_err(|e| format!("Failed to read clients.dat: {e}"))?;
+        .map_err(|e| format!("Failed to read clients from storage: {e}"))?;
 
     for (idx, line) in content.lines().map(|l| l.trim()).enumerate() {
         if !line.is_empty() {
             let client: Client = serde_json::from_str(line).map_err(|e| {
                 format!(
-                    "Corrupted record inside clients.dat at line {}: {e}",
+                    "Corrupted record inside clients storage at line {}: {e}",
                     idx + 1
                 )
             })?;
-            clients_cache.insert(client.document_number.clone(), client);
+
+            // (document, mutex(balance, delta))
+            let value = (
+                client.document_number as Document,
+                std::sync::Mutex::new((client.balance, 0.0)),
+            );
+
+            clients_map.insert(client.client_id, value);
         }
     }
 
-    println!("✅ [BOOTSTRAP SUCCESS] Last nonce: {last_nonce}.",);
-    Ok((last_nonce, clients_cache))
+    println!("✅ [BOOTSTRAP SUCCESS]",);
+
+    // Construimos la instancia definitiva de Cache envolviendo las estructuras
+    Ok(Cache {
+        clients: tokio::sync::RwLock::new(clients_map),
+        nonce: std::sync::atomic::AtomicI32::new(last_nonce),
+        in_flight: tokio::sync::RwLock::new(HashSet::new()),
+    })
 }
 
 /// Verifies co-existence of core tracking files or initializes a clean structure.

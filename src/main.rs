@@ -1,19 +1,22 @@
 mod constants;
-mod models;
+mod domain;
 mod utils;
 
 use actix_web::{App, HttpResponse, HttpServer, Responder, Result, get, post, web};
-use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::AtomicI32;
 use std::sync::atomic::Ordering::Relaxed;
-use tokio::sync::Mutex;
-use uuid::Uuid;
 
-use models::{Cache, Client, NewClientBody, NewCreditTransactionBody, NewDebitTransactionBody};
+use crate::domain::cache::Cache;
+use crate::domain::client::Client;
+use crate::domain::dto::{NewClientBody, NewCreditTransactionBody, NewDebitTransactionBody};
 
 use crate::utils::bootstrap;
+
+pub enum TransactionDirection {
+    Credit,
+    Debit,
+}
 
 /// Endpoints 
 
@@ -52,13 +55,34 @@ async fn new_client(
 }
 
 #[post("/new_credit_transaction")]
-async fn new_credit_transaction(req_body: web::Json<NewCreditTransactionBody>) -> impl Responder {
-    HttpResponse::Ok().json(req_body)
+async fn new_credit_transaction(
+    req_body: web::Json<NewCreditTransactionBody>,
+    cache: web::Data<Cache>,
+) -> Result<impl Responder> {
+    let new_balance = cache
+        .apply_balance_change(
+            req_body.client_id,
+            req_body.credit_amount,
+            TransactionDirection::Credit,
+        )
+        .await;
+
+    Ok(HttpResponse::Ok().json(new_balance))
 }
 
 #[post("/new_debit_transaction")]
-async fn new_debit_transaction(req_body: web::Json<NewDebitTransactionBody>) -> impl Responder {
-    HttpResponse::Ok().json(req_body)
+async fn new_debit_transaction(
+    req_body: web::Json<NewDebitTransactionBody>,
+    cache: web::Data<Cache>,
+) -> Result<impl Responder> {
+    let new_balance = cache
+        .apply_balance_change(
+            req_body.client_id,
+            req_body.debit_amount,
+            TransactionDirection::Debit,
+        )
+        .await;
+    Ok(HttpResponse::Ok().json(new_balance))
 }
 
 #[post("/store_balances")]
@@ -75,17 +99,10 @@ async fn client_balance() -> impl Responder {
 async fn main() -> std::io::Result<()> {
     println!("Starting server");
 
-    let (last_nonce, clients) = match bootstrap() {
-        Ok((nonce, clients)) => (nonce, clients),
+    let cache = match bootstrap() {
+        Ok(cache) => web::Data::new(cache),
         Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
     };
-
-    // Initialize cache
-    let cache = web::Data::new(Cache {
-        in_flight: Mutex::new(HashSet::new()),
-        clients: Mutex::new(clients),
-        nonce: AtomicI32::new(last_nonce),
-    });
 
     HttpServer::new(move || {
         App::new()
