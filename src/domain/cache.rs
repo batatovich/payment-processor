@@ -29,6 +29,17 @@ pub struct Cache {
 }
 
 impl Cache {
+    /// Builds a cache from a hydrated clients map and the latest ledger nonce.
+    pub fn new(clients: HashMap<Uuid, (Document, Mutex<(Decimal, Decimal)>)>, nonce: i32) -> Self {
+        Cache {
+            clients: tokio::sync::RwLock::new(clients),
+            nonce: AtomicI32::new(nonce),
+            in_flight: Mutex::new(HashSet::new()),
+            dirty_clients: Mutex::new(HashSet::new()),
+            store_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
     /// Inserts a new client into the cache, initializing its balance with a zero delta.
     pub async fn insert_client(&self, client: &Client) {
         let mut clients = self.clients.write().await;
@@ -98,7 +109,10 @@ impl Cache {
         let clients_read_guard = self.clients.read().await;
 
         // Once we got the outer rwlock, we lock the std mutex of dirty clients to update the balance and delta
-        let mut dirty_guard = self.dirty_clients.lock().map_err(|_| AppError::LockPoisoned)?;
+        let mut dirty_guard = self
+            .dirty_clients
+            .lock()
+            .map_err(|_| AppError::LockPoisoned)?;
 
         // Iterate over the clients we just successfully persisted to storage
         for (client_id, delta) in clear_deltas {
@@ -134,8 +148,7 @@ impl Cache {
     ) -> Result<(Document, Decimal), AppError> {
         let clients = self.clients.read().await;
 
-        let (document, balance_mutex) =
-            clients.get(&client_id).ok_or(AppError::ClientNotFound)?;
+        let (document, balance_mutex) = clients.get(&client_id).ok_or(AppError::ClientNotFound)?;
 
         let balance_lock = balance_mutex.lock().map_err(|_| AppError::LockPoisoned)?;
         let (base_balance, current_delta) = &*balance_lock;
@@ -172,7 +185,10 @@ impl Cache {
     }
 
     pub fn insert_dirty_client(&self, client_id: Uuid) -> Result<(), AppError> {
-        let mut dirty_clients = self.dirty_clients.lock().map_err(|_| AppError::LockPoisoned)?;
+        let mut dirty_clients = self
+            .dirty_clients
+            .lock()
+            .map_err(|_| AppError::LockPoisoned)?;
 
         dirty_clients.insert(client_id);
 
@@ -180,7 +196,10 @@ impl Cache {
     }
 
     pub fn remove_dirty_client(&self, client_id: &Uuid) -> Result<(), AppError> {
-        let mut dirty_clients = self.dirty_clients.lock().map_err(|_| AppError::LockPoisoned)?;
+        let mut dirty_clients = self
+            .dirty_clients
+            .lock()
+            .map_err(|_| AppError::LockPoisoned)?;
 
         dirty_clients.remove(client_id);
 
@@ -188,7 +207,10 @@ impl Cache {
     }
 
     pub fn get_dirty_clients(&self) -> Result<HashSet<Uuid>, AppError> {
-        let dirty_clients = self.dirty_clients.lock().map_err(|_| AppError::LockPoisoned)?;
+        let dirty_clients = self
+            .dirty_clients
+            .lock()
+            .map_err(|_| AppError::LockPoisoned)?;
 
         Ok(dirty_clients.clone())
     }
@@ -207,8 +229,7 @@ impl Cache {
         for client_id in dirty_clients {
             if let Some((_doc, inner_mutex)) = clients_read_guard.get(client_id) {
                 let current_delta = {
-                    let balance_lock =
-                        inner_mutex.lock().map_err(|_| AppError::LockPoisoned)?;
+                    let balance_lock = inner_mutex.lock().map_err(|_| AppError::LockPoisoned)?;
 
                     let (_base_balance, current_delta) = &*balance_lock;
                     *current_delta
