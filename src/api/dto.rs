@@ -1,4 +1,4 @@
-use super::client::{Country, Document};
+use crate::model::{Country, Document};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
