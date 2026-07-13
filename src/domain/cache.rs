@@ -127,6 +127,23 @@ impl Cache {
         Ok(())
     }
 
+    /// Returns the client's document number together with its current balance,
+    /// computed as the persisted base balance plus any in-memory delta that has
+    /// not yet been flushed to storage.
+    pub async fn get_client_snapshot(
+        &self,
+        client_id: Uuid,
+    ) -> Result<(Document, Decimal), Box<dyn std::error::Error>> {
+        let clients = self.clients.read().await;
+
+        let (document, balance_mutex) = clients.get(&client_id).ok_or("Client not found")?;
+
+        let balance_lock = balance_mutex.lock().map_err(|_| "Mutex poisoned")?;
+        let (base_balance, current_delta) = &*balance_lock;
+
+        Ok((document.clone(), *base_balance + *current_delta))
+    }
+
     pub async fn is_document_in_use(&self, document_number: &Document) -> bool {
         // Read lock
         let clients = self.clients.read().await;

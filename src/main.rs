@@ -8,7 +8,10 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use crate::domain::cache::Cache;
 use crate::domain::client::Client;
-use crate::domain::dto::{NewClientBody, NewCreditTransactionBody, NewDebitTransactionBody};
+use crate::domain::dto::{
+    GetBalanceQuery, GetBalanceResponse, NewClientBody, NewCreditTransactionBody,
+    NewDebitTransactionBody,
+};
 use crate::utils::bootstrap;
 
 pub enum TransactionDirection {
@@ -25,7 +28,7 @@ async fn index() -> impl Responder {
         ("POST /new_credit_transaction", "Record a credit deposit"),
         ("POST /new_debit_transaction", "Record a debit withdrawal"),
         ("POST /store_balances", "Persist current client balances"),
-        ("GET /client_balance", "Retrieve a client's current balance"),
+        ("GET /get_balance", "Retrieve a client's current balance"),
     ];
 
     HttpResponse::Ok().json(&endpoints)
@@ -142,9 +145,23 @@ async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder> {
     Ok(HttpResponse::Ok().into())
 }
 
-#[get("/client_balance")]
-async fn client_balance() -> impl Responder {
-    HttpResponse::Ok().body("The client balance is 3.14")
+#[get("/get_balance")]
+async fn get_balance(
+    query: web::Query<GetBalanceQuery>,
+    cache: web::Data<Cache>,
+) -> Result<impl Responder> {
+    let client_id = query.client_id;
+
+    let (document_number, balance) = cache
+        .get_client_snapshot(client_id)
+        .await
+        .map_err(|e| actix_web::error::ErrorNotFound(e))?;
+
+    Ok(HttpResponse::Ok().json(GetBalanceResponse {
+        client_id,
+        document_number,
+        balance,
+    }))
 }
 
 #[actix_web::main]
@@ -164,7 +181,7 @@ async fn main() -> std::io::Result<()> {
             .service(new_debit_transaction)
             .service(new_credit_transaction)
             .service(store_balances)
-            .service(client_balance)
+            .service(get_balance)
     })
     .bind(("127.0.0.1", 8080))?
     .run()
