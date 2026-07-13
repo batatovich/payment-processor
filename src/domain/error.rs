@@ -31,7 +31,7 @@ pub enum AppError {
     Serde(#[from] serde_json::Error),
 
     /// Startup-time failures (missing control files, corrupted storage, nonce
-    /// mismatches, etc.). These abort boot rather than serve a request.
+    /// mismatches, etc.)
     #[error("Bootstrap failure: {0}")]
     Bootstrap(String),
 }

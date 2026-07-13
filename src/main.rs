@@ -3,7 +3,7 @@ mod domain;
 mod storage;
 mod utils;
 
-use actix_web::{App, HttpResponse, HttpServer, Responder, Result, get, post, web};
+use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
 use std::sync::atomic::Ordering::Relaxed;
 
 use crate::domain::cache::Cache;
@@ -12,6 +12,7 @@ use crate::domain::dto::{
     GetBalanceQuery, GetBalanceResponse, NewClientBody, NewCreditTransactionBody,
     NewDebitTransactionBody,
 };
+use crate::domain::error::AppError;
 use crate::utils::bootstrap;
 
 pub enum TransactionDirection {
@@ -38,22 +39,18 @@ async fn index() -> impl Responder {
 async fn new_client(
     req_body: web::Json<NewClientBody>,
     cache: web::Data<Cache>,
-) -> Result<impl Responder> {
+) -> Result<impl Responder, AppError> {
     let body = req_body.into_inner();
     let document_number = &body.document_number.clone();
 
     // Check if document is already in use
     if cache.is_document_in_use(document_number).await {
-        return Err(actix_web::error::ErrorConflict(
-            "A client with that document already exists.",
-        ));
+        return Err(AppError::DocumentInUse);
     }
 
     // Set document in-flight to mark that this client is being created and has yet to be persisted to storage.
     // The clients cache will only reflect the new client once its safely saved to storage.
-    cache
-        .set_document_in_flight(document_number)
-        .map_err(|e| actix_web::error::ErrorConflict(e))?;
+    cache.set_document_in_flight(document_number)?;
 
     // New Client
     let new_client = Client::new(body);
@@ -62,19 +59,15 @@ async fn new_client(
     // If this returns an error, the client document will be removed from the in_flight cache
     // and never added to the clients cache
     if let Err(e) = crate::storage::save_client_to_storage(&new_client).await {
-        cache
-            .remove_document_in_flight(document_number)
-            .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
-        return Err(actix_web::error::ErrorInternalServerError(e));
+        cache.remove_document_in_flight(document_number)?;
+        return Err(e);
     }
 
     // Add the new client to the clients cache
     cache.insert_client(&new_client).await;
 
     // Remove new client document from in-flight cache
-    cache
-        .remove_document_in_flight(document_number)
-        .map_err(actix_web::error::ErrorInternalServerError)?;
+    cache.remove_document_in_flight(document_number)?;
 
     // Return the client id
     Ok(HttpResponse::Ok().json(new_client.client_id.to_string()))
@@ -84,15 +77,14 @@ async fn new_client(
 async fn new_credit_transaction(
     req_body: web::Json<NewCreditTransactionBody>,
     cache: web::Data<Cache>,
-) -> Result<impl Responder> {
+) -> Result<impl Responder, AppError> {
     let new_balance = cache
         .apply_balance_change(
             req_body.client_id,
             req_body.credit_amount,
             TransactionDirection::Credit,
         )
-        .await
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
+        .await?;
 
     Ok(HttpResponse::Ok().json(new_balance))
 }
@@ -101,21 +93,20 @@ async fn new_credit_transaction(
 async fn new_debit_transaction(
     req_body: web::Json<NewDebitTransactionBody>,
     cache: web::Data<Cache>,
-) -> Result<impl Responder> {
+) -> Result<impl Responder, AppError> {
     let new_balance = cache
         .apply_balance_change(
             req_body.client_id,
             req_body.debit_amount,
             TransactionDirection::Debit,
         )
-        .await
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
+        .await?;
 
     Ok(HttpResponse::Ok().json(new_balance))
 }
 
 #[post("/store_balances")]
-async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder> {
+async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder, AppError> {
     // Lock the store guard.
     // If we receive many requests to store_balances at the same time, we will effectively be making a queue here,
     // waiting for earlier calls to finish writing to storage and udpating dirty clients cache.
@@ -128,7 +119,7 @@ async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder> {
 
     // Early return if no news
     if dirty_clients.is_empty() {
-        return Ok(HttpResponse::Ok());
+        return Ok(HttpResponse::Ok().finish());
     }
     let deltas_to_write = cache.collect_batch_deltas(&dirty_clients).await?;
 
@@ -142,20 +133,17 @@ async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder> {
 
     cache.increment_nonce();
 
-    Ok(HttpResponse::Ok().into())
+    Ok(HttpResponse::Ok().finish())
 }
 
 #[get("/get_balance")]
 async fn get_balance(
     query: web::Query<GetBalanceQuery>,
     cache: web::Data<Cache>,
-) -> Result<impl Responder> {
+) -> Result<impl Responder, AppError> {
     let client_id = query.client_id;
 
-    let (document_number, balance) = cache
-        .get_client_snapshot(client_id)
-        .await
-        .map_err(|e| actix_web::error::ErrorNotFound(e))?;
+    let (document_number, balance) = cache.get_client_snapshot(client_id).await?;
 
     Ok(HttpResponse::Ok().json(GetBalanceResponse {
         client_id,
@@ -170,7 +158,7 @@ async fn main() -> std::io::Result<()> {
 
     let cache = match bootstrap() {
         Ok(cache) => web::Data::new(cache),
-        Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+        Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
     };
 
     HttpServer::new(move || {
