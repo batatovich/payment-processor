@@ -1,8 +1,8 @@
 use super::dto::NewClientBody;
 use chrono::NaiveDate;
+use rust_decimal::{Decimal, dec};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
 pub type Document = String;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -20,7 +20,7 @@ pub struct Client {
     pub country: Country,
     pub document_number: Document,
     pub birth_date: NaiveDate,
-    pub balance: f64, // Tu balance absoluto maestro en disco
+    pub balance: Decimal,
 }
 
 impl Client {
@@ -31,7 +31,7 @@ impl Client {
             country: body.country,
             document_number: body.document_number,
             birth_date: body.birth_date,
-            balance: 0f64,
+            balance: dec!(0),
         }
     }
 }

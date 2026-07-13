@@ -1,3 +1,4 @@
+use rust_decimal::{Decimal, dec};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::sync::atomic::AtomicI32;
@@ -14,11 +15,15 @@ pub struct Cache {
     // The key is the cliend_id and the value is a tuple: (client document, mutex(net balance, delta))
     // The outer async rwlock allows us to aquire a read lock when checking for client existence or quering client balance.
     // If we need to modify a client balance, we aquire the inner std::Mutex.
-    pub clients: RwLock<HashMap<Uuid, (Document, Mutex<(f64, f64)>)>>,
+    pub clients: RwLock<HashMap<Uuid, (Document, Mutex<(Decimal, Decimal)>)>>,
     // Latest nonce
     pub nonce: AtomicI32,
     // In-flight clients: new clients being processed and waiting for storage and cache sync up
     pub in_flight: RwLock<HashSet<Document>>,
+    // Keeps track of clients with balance changes in memory
+    pub dirty_clients: Mutex<HashSet<Uuid>>,
+    // Lock used to prevent data races when writing to storage
+    pub store_lock: tokio::sync::Mutex<()>,
 }
 
 impl Cache {
@@ -59,7 +64,10 @@ impl Cache {
             let mut clients = self.clients.write().await;
             clients.insert(
                 client.client_id.clone(),
-                (client.document_number, Mutex::new((client.balance, 0.0))),
+                (
+                    client.document_number,
+                    Mutex::new((client.balance, dec!(0))),
+                ),
             );
         }
 
@@ -74,9 +82,9 @@ impl Cache {
     pub async fn apply_balance_change(
         &self,
         client_id: Uuid,
-        delta: f64,
+        delta: Decimal,
         direction: TransactionDirection,
-    ) -> Result<f64, &'static str> {
+    ) -> Result<Decimal, &'static str> {
         // Acquire outer read lock
         let clients = self.clients.read().await;
 
@@ -99,7 +107,7 @@ impl Cache {
                 TransactionDirection::Debit => {
                     let new_balance = *base_balance + *current_delta - delta;
                     // Only update if new balance is positive
-                    if new_balance >= 0.0 {
+                    if new_balance >= dec!(0) {
                         // Decrement current delta by |delta|
                         *current_delta -= delta;
                         Ok(new_balance)

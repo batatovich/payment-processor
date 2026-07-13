@@ -1,4 +1,5 @@
 use chrono::NaiveDate;
+use rust_decimal::dec;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 // use std::io::Write;
@@ -80,7 +81,7 @@ pub fn bootstrap() -> Result<Cache, String> {
             // (document, mutex(balance, delta))
             let value = (
                 client.document_number as Document,
-                std::sync::Mutex::new((client.balance, 0.0)),
+                std::sync::Mutex::new((client.balance, dec!(0))),
             );
 
             clients_map.insert(client.client_id, value);
