@@ -49,7 +49,7 @@ async fn new_client(
 
     // Set document in-flight to mark that this client is being created and has yet to be persisted to storage.
     // The clients cache will only reflect the new client once its safely saved to storage.
-    cache.set_document_in_flight(document_number)?;
+    cache.set_document_in_flight(document_number).await?;
 
     // New Client
     let new_client = Client::new(body);
@@ -58,7 +58,7 @@ async fn new_client(
     // If this returns an error, the client document will be removed from the in_flight cache
     // and never added to the clients cache
     if let Err(e) = crate::storage::save_client_to_storage(&new_client).await {
-        cache.remove_document_in_flight(document_number)?;
+        cache.remove_document_in_flight(document_number).await?;
         return Err(e);
     }
 
@@ -66,7 +66,7 @@ async fn new_client(
     cache.insert_client(&new_client).await;
 
     // Remove new client document from in-flight cache
-    cache.remove_document_in_flight(document_number)?;
+    cache.remove_document_in_flight(document_number).await?;
 
     // Return the client id
     Ok(HttpResponse::Ok().json(new_client.client_id.to_string()))
@@ -114,7 +114,7 @@ async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder, AppEr
     let _store_guard = cache.store_lock.lock().await;
 
     // Snapshot which clients have balance changes to save
-    let dirty_clients = cache.get_dirty_clients()?;
+    let dirty_clients = cache.get_dirty_clients().await?;
 
     // Early return if no news
     if dirty_clients.is_empty() {

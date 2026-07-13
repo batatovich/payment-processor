@@ -7,7 +7,7 @@ use rust_decimal::dec;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 
 /// Bootstrapping routine. Runs each time the server starts.
 pub fn run() -> Result<Cache, AppError> {
