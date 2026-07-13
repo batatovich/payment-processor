@@ -23,3 +23,15 @@ pub struct NewDebitTransactionBody {
     pub client_id: Uuid,
     pub debit_amount: Decimal,
 }
+
+#[derive(Deserialize, Serialize)]
+pub struct GetBalanceQuery {
+    pub client_id: Uuid,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct GetBalanceResponse {
+    pub client_id: Uuid,
+    pub document_number: Document,
+    pub balance: Decimal,
+}
