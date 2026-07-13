@@ -1,6 +1,6 @@
 use crate::constants::{DATA_DIR, FILE_CLIENTS_METADATA};
-use crate::domain::client::Client;
-use crate::domain::error::AppError;
+use crate::error::AppError;
+use crate::model::Client;
 use rust_decimal::Decimal;
 use std::path::Path;
 use tokio::fs;

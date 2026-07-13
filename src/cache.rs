@@ -5,9 +5,8 @@ use std::sync::atomic::Ordering::Relaxed;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
-use super::client::{Client, Document};
-use super::error::AppError;
-use crate::TransactionDirection;
+use crate::error::AppError;
+use crate::model::{Client, Document, TransactionDirection};
 
 // Shared App State
 

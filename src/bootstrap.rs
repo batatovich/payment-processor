@@ -1,8 +1,8 @@
 use crate::constants::{DATA_DIR, FILE_CLIENTS_METADATA};
-use crate::domain::cache::Cache;
-use crate::domain::cache::ClientsMap;
-use crate::domain::client::{Client, Document};
-use crate::domain::error::AppError;
+use crate::error::AppError;
+use crate::model::{Client, Document};
+use crate::cache::Cache;
+use crate::cache::ClientsMap;
 use rust_decimal::dec;
 use std::collections::HashMap;
 use std::fs;
