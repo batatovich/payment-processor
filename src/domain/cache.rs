@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use uuid::Uuid;
 
 use super::client::{Client, Document};
+use super::error::AppError;
 use crate::TransactionDirection;
 
 // Shared App State
@@ -45,7 +46,7 @@ impl Cache {
         client_id: Uuid,
         delta: Decimal,
         direction: TransactionDirection,
-    ) -> Result<Decimal, &'static str> {
+    ) -> Result<Decimal, AppError> {
         // Acquire outer lock in read mode.
         // No other task can add or remove elements to the hashmap while we hold this lock
         let clients = self.clients.read().await;
@@ -53,7 +54,7 @@ impl Cache {
         if let Some((_document, balance_mutex)) = clients.get(&client_id) {
             let result = {
                 // Lock this client balance mutex
-                let mut balance_lock = balance_mutex.lock().map_err(|_| "Mutex poisoned")?;
+                let mut balance_lock = balance_mutex.lock().map_err(|_| AppError::LockPoisoned)?;
 
                 // Destructure the lock taking a mutable reference, as we need to modify the current delta
                 let (base_balance, current_delta) = &mut *balance_lock;
@@ -70,7 +71,7 @@ impl Cache {
                             *current_delta -= delta;
                             Ok(new_balance)
                         } else {
-                            return Err("Insufficient funds");
+                            return Err(AppError::InsufficientFunds);
                         }
                     }
                 }
@@ -85,22 +86,19 @@ impl Cache {
 
             return result;
         } else {
-            return Err("Client not found");
+            return Err(AppError::ClientNotFound);
         }
     }
 
     pub async fn apply_persisted_deltas(
         &self,
         clear_deltas: &[(Uuid, Decimal)],
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), AppError> {
         // Acquire the outer async RwLock read guard
         let clients_read_guard = self.clients.read().await;
 
         // Once we got the outer rwlock, we lock the std mutex of dirty clients to update the balance and delta
-        let mut dirty_guard = self
-            .dirty_clients
-            .lock()
-            .map_err(|e| format!("found error {e}"))?;
+        let mut dirty_guard = self.dirty_clients.lock().map_err(|_| AppError::LockPoisoned)?;
 
         // Iterate over the clients we just successfully persisted to storage
         for (client_id, delta) in clear_deltas {
@@ -108,7 +106,7 @@ impl Cache {
                 // Isolate the synchronous client lock inside a block so it releases immediately
                 let is_delta_zero = {
                     let mut balance_lock =
-                        inner_mutex.lock().map_err(|e| format!("found error {e}"))?;
+                        inner_mutex.lock().map_err(|_| AppError::LockPoisoned)?;
                     let (base_balance, current_delta) = &mut *balance_lock;
 
                     *base_balance += delta;
@@ -133,12 +131,13 @@ impl Cache {
     pub async fn get_client_snapshot(
         &self,
         client_id: Uuid,
-    ) -> Result<(Document, Decimal), Box<dyn std::error::Error>> {
+    ) -> Result<(Document, Decimal), AppError> {
         let clients = self.clients.read().await;
 
-        let (document, balance_mutex) = clients.get(&client_id).ok_or("Client not found")?;
+        let (document, balance_mutex) =
+            clients.get(&client_id).ok_or(AppError::ClientNotFound)?;
 
-        let balance_lock = balance_mutex.lock().map_err(|_| "Mutex poisoned")?;
+        let balance_lock = balance_mutex.lock().map_err(|_| AppError::LockPoisoned)?;
         let (base_balance, current_delta) = &*balance_lock;
 
         Ok((document.clone(), *base_balance + *current_delta))
@@ -154,48 +153,42 @@ impl Cache {
             .any(|(doc, _balance)| *doc == *document_number)
     }
 
-    pub fn set_document_in_flight(&self, document_number: &Document) -> Result<(), &'static str> {
-        let mut in_flight = self.in_flight.lock().map_err(|_| "Mutex poisoned")?;
+    pub fn set_document_in_flight(&self, document_number: &Document) -> Result<(), AppError> {
+        let mut in_flight = self.in_flight.lock().map_err(|_| AppError::LockPoisoned)?;
         if in_flight.contains(document_number) {
-            return Err("Processing");
+            return Err(AppError::DocumentInFlight);
         }
         in_flight.insert(document_number.clone());
 
         Ok(())
     }
 
-    pub fn remove_document_in_flight(
-        &self,
-        document_number: &Document,
-    ) -> Result<(), &'static str> {
-        let mut in_flight = self.in_flight.lock().map_err(|_| "Mutex poisoned")?;
+    pub fn remove_document_in_flight(&self, document_number: &Document) -> Result<(), AppError> {
+        let mut in_flight = self.in_flight.lock().map_err(|_| AppError::LockPoisoned)?;
 
         in_flight.remove(document_number);
 
         Ok(())
     }
 
-    pub fn insert_dirty_client(&self, client_id: Uuid) -> Result<(), &'static str> {
-        let mut dirty_clients = self.dirty_clients.lock().map_err(|_| "Mutex poisoned")?;
+    pub fn insert_dirty_client(&self, client_id: Uuid) -> Result<(), AppError> {
+        let mut dirty_clients = self.dirty_clients.lock().map_err(|_| AppError::LockPoisoned)?;
 
         dirty_clients.insert(client_id);
 
         Ok(())
     }
 
-    pub fn remove_dirty_client(&self, client_id: &Uuid) -> Result<(), &'static str> {
-        let mut dirty_clients = self.dirty_clients.lock().map_err(|_| "Mutex poisoned")?;
+    pub fn remove_dirty_client(&self, client_id: &Uuid) -> Result<(), AppError> {
+        let mut dirty_clients = self.dirty_clients.lock().map_err(|_| AppError::LockPoisoned)?;
 
         dirty_clients.remove(client_id);
 
         Ok(())
     }
 
-    pub fn get_dirty_clients(&self) -> Result<HashSet<Uuid>, Box<dyn std::error::Error>> {
-        let dirty_clients = self
-            .dirty_clients
-            .lock()
-            .map_err(|_| "dirty clients lock poisoned")?;
+    pub fn get_dirty_clients(&self) -> Result<HashSet<Uuid>, AppError> {
+        let dirty_clients = self.dirty_clients.lock().map_err(|_| AppError::LockPoisoned)?;
 
         Ok(dirty_clients.clone())
     }
@@ -204,7 +197,7 @@ impl Cache {
     pub async fn collect_batch_deltas(
         &self,
         dirty_clients: &HashSet<Uuid>,
-    ) -> Result<Vec<(Uuid, Decimal)>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<(Uuid, Decimal)>, AppError> {
         // Acquire the outer async RwLock read guard
         let clients_read_guard = self.clients.read().await;
 
@@ -215,7 +208,7 @@ impl Cache {
             if let Some((_doc, inner_mutex)) = clients_read_guard.get(client_id) {
                 let current_delta = {
                     let balance_lock =
-                        inner_mutex.lock().map_err(|e| format!("found error {e}"))?;
+                        inner_mutex.lock().map_err(|_| AppError::LockPoisoned)?;
 
                     let (_base_balance, current_delta) = &*balance_lock;
                     *current_delta
