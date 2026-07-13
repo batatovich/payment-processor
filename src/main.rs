@@ -1,7 +1,7 @@
+mod bootstrap;
 mod constants;
 mod domain;
 mod storage;
-mod utils;
 
 use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
 use std::sync::atomic::Ordering::Relaxed;
@@ -13,7 +13,6 @@ use crate::domain::dto::{
     NewDebitTransactionBody,
 };
 use crate::domain::error::AppError;
-use crate::utils::bootstrap;
 
 pub enum TransactionDirection {
     Credit,
@@ -156,9 +155,14 @@ async fn get_balance(
 async fn main() -> std::io::Result<()> {
     println!("Starting server");
 
-    let cache = match bootstrap() {
+    let cache = match bootstrap::run() {
         Ok(cache) => web::Data::new(cache),
-        Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+        Err(e) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ));
+        }
     };
 
     HttpServer::new(move || {

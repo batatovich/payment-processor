@@ -11,13 +11,15 @@ use crate::TransactionDirection;
 
 // Shared App State
 
+/// (document number, mutex-guarded (persisted balance, in-memory delta))
+pub type ClientsMap = HashMap<Uuid, (Document, Mutex<(Decimal, Decimal)>)>;
+
 pub struct Cache {
     // Map of all existing clients.
     // The key is the cliend_id and the value is a tuple: (client document, mutex(net balance, delta))
     // The outer async rwlock allows us to aquire a read lock when checking for client existence or quering client balance.
     // We only acquire the write lock if we need to insert a new client
-    pub clients:
-        tokio::sync::RwLock<HashMap<Uuid, (Document, std::sync::Mutex<(Decimal, Decimal)>)>>,
+    pub clients: tokio::sync::RwLock<ClientsMap>,
     // Latest nonce
     pub nonce: AtomicI32,
     // In-flight clients: new clients being processed and waiting for storage and cache sync up

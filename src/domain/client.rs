@@ -3,6 +3,7 @@ use chrono::NaiveDate;
 use rust_decimal::{Decimal, dec};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
 pub type Document = String;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
