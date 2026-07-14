@@ -73,7 +73,7 @@ pub async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder, A
     // waiting for earlier calls to finish writing to storage and udpating dirty clients cache.
     // The lock is released when the function returns,
     // and only there can another task try to store balances again.
-    let _store_guard = cache.store_lock.lock().await;
+    let _store_guard = cache.persistence_lock.lock().await;
 
     // Snapshot which clients have balance changes to save
     let dirty_clients = cache.get_dirty_clients().await?;

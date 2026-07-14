@@ -1,8 +1,7 @@
-use crate::cache::Cache;
-use crate::cache::ClientsMap;
+use crate::cache::{Cache, ClientBalances, ClientState, ClientsMap};
 use crate::constants::{DATA_DIR, FILE_CLIENTS_METADATA};
 use crate::error::AppError;
-use crate::model::{Client, Document};
+use crate::model::Client;
 use rust_decimal::dec;
 use std::collections::HashMap;
 use std::fs;
@@ -103,10 +102,13 @@ fn hydrate_clients(clients_path: &Path) -> Result<ClientsMap, AppError> {
 
         clients_map.insert(
             client.client_id,
-            (
-                client.document_number as Document,
-                Mutex::new((client.balance, dec!(0))),
-            ),
+            ClientState {
+                document: client.details.document_number.clone(),
+                balances: Mutex::new(ClientBalances {
+                    settled_balance: client.balance,
+                    delta_balance: dec!(0),
+                }),
+            },
         );
     }
 

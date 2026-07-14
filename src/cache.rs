@@ -8,36 +8,51 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::model::{Client, Document, TransactionDirection};
 
+/// Represents the in-memory state of a single client.
+pub struct ClientState {
+    pub document: Document,
+    pub balances: Mutex<ClientBalances>,
+}
+/// Tracks the active balance and pending balance change of a client.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ClientBalances {
+    /// The permanently persisted, settled balance of the client.
+    pub settled_balance: Decimal,
+    /// The temporary, uncommitted change (delta) to be written to the next ledger file.
+    pub delta_balance: Decimal,
+}
+
+pub type ClientsMap = HashMap<Uuid, ClientState>;
+
 // Shared App State
-
-/// (document number, mutex-guarded (persisted balance, in-memory delta))
-pub type ClientsMap = HashMap<Uuid, (Document, Mutex<(Decimal, Decimal)>)>;
-
 pub struct Cache {
-    // Map of all existing clients.
-    // The key is the cliend_id and the value is a tuple: (client document, mutex(net balance, delta))
-    // The outer async rwlock allows us to aquire a read lock when checking for client existence or quering client balance.
-    // We only acquire the write lock if we need to insert a new client
+    /// The latest nonce successfully committed to storage.
+    latest_nonce: AtomicI32,
+
+    /// In-memory registry of all clients.
+    /// Read-lock for balance queries and existence checks; write-lock only to register new clients.
     clients: RwLock<ClientsMap>,
-    // Latest nonce
-    nonce: AtomicI32,
-    // In-flight clients: new clients being processed and waiting for storage and cache sync up
-    in_flight: Mutex<HashSet<Document>>,
-    // Keeps track of clients with balance changes in memory
-    dirty_clients: Mutex<HashSet<Uuid>>,
-    // Lock used to prevent data races when writing to storage
-    pub store_lock: Mutex<()>,
+
+    /// Unique document numbers currently undergoing registration.
+    /// Prevents duplicate sign-up race conditions before they are persisted.
+    pending_registrations: Mutex<HashSet<Document>>,
+
+    /// Client IDs that have memory-only balance updates (deltas) waiting to be flushed.
+    dirty_client_ids: Mutex<HashSet<Uuid>>,
+
+    /// Serializes writing operations to guarantee atomic updates and prevent races.
+    pub persistence_lock: Mutex<()>,
 }
 
 impl Cache {
     /// Builds a cache from a hydrated clients map and the latest ledger nonce.
-    pub fn new(clients: HashMap<Uuid, (Document, Mutex<(Decimal, Decimal)>)>, nonce: i32) -> Self {
+    pub fn new(clients: ClientsMap, nonce: i32) -> Self {
         Cache {
-            clients: tokio::sync::RwLock::new(clients),
-            nonce: AtomicI32::new(nonce),
-            in_flight: Mutex::new(HashSet::new()),
-            dirty_clients: Mutex::new(HashSet::new()),
-            store_lock: tokio::sync::Mutex::new(()),
+            clients: RwLock::new(clients),
+            latest_nonce: AtomicI32::new(nonce),
+            pending_registrations: Mutex::new(HashSet::new()),
+            dirty_client_ids: Mutex::new(HashSet::new()),
+            persistence_lock: Mutex::new(()),
         }
     }
 }
@@ -48,10 +63,13 @@ impl Cache {
         let mut clients = self.clients.write().await;
         clients.insert(
             client.client_id,
-            (
-                client.document_number.clone(),
-                Mutex::new((client.balance, dec!(0))),
-            ),
+            ClientState {
+                document: client.details.document_number.clone(),
+                balances: Mutex::new(ClientBalances {
+                    settled_balance: client.balance,
+                    delta_balance: dec!(0),
+                }),
+            },
         );
     }
 
@@ -65,24 +83,21 @@ impl Cache {
         // No other task can add or remove elements to the hashmap while we hold this lock
         let clients = self.clients.read().await;
 
-        if let Some((_document, balance_mutex)) = clients.get(&client_id) {
+        if let Some(client_state) = clients.get(&client_id) {
             let result = {
-                // Lock this client balance mutex
-                let mut balance_lock = balance_mutex.lock().await;
-
-                // Destructure the lock taking a mutable reference, as we need to modify the current delta
-                let (base_balance, current_delta) = &mut *balance_lock;
+                // Lock this client's balances
+                let mut balances = client_state.balances.lock().await;
 
                 match direction {
                     TransactionDirection::Credit => {
-                        let new_balance = *base_balance + *current_delta + delta;
-                        *current_delta += delta;
+                        let new_balance = balances.settled_balance + balances.delta_balance + delta;
+                        balances.delta_balance += delta;
                         Ok(new_balance)
                     }
                     TransactionDirection::Debit => {
-                        let new_balance = *base_balance + *current_delta - delta;
+                        let new_balance = balances.settled_balance + balances.delta_balance - delta;
                         if new_balance >= dec!(0) {
-                            *current_delta -= delta;
+                            balances.delta_balance -= delta;
                             Ok(new_balance)
                         } else {
                             return Err(AppError::InsufficientFunds);
@@ -90,7 +105,7 @@ impl Cache {
                     }
                 }
 
-                // balance_lock is droped when leaving this scope
+                // balances lock is dropped when leaving this scope
             };
 
             // If we successfully updated the client delta in the cache, add it to the dirty clients list
@@ -112,20 +127,19 @@ impl Cache {
         let clients_read_guard = self.clients.read().await;
 
         // Once we got the outer rwlock, we lock the std mutex of dirty clients to update the balance and delta
-        let mut dirty_guard = self.dirty_clients.lock().await;
+        let mut dirty_guard = self.dirty_client_ids.lock().await;
 
         // Iterate over the clients we just successfully persisted to storage
         for (client_id, delta) in clear_deltas {
-            if let Some((_doc, inner_mutex)) = clients_read_guard.get(client_id) {
+            if let Some(client_state) = clients_read_guard.get(client_id) {
                 // Isolate the synchronous client lock inside a block so it releases immediately
                 let is_delta_zero = {
-                    let mut balance_lock = inner_mutex.lock().await;
-                    let (base_balance, current_delta) = &mut *balance_lock;
+                    let mut balances = client_state.balances.lock().await;
 
-                    *base_balance += delta;
-                    *current_delta -= delta;
+                    balances.settled_balance += delta;
+                    balances.delta_balance -= delta;
 
-                    *current_delta == dec!(0)
+                    balances.delta_balance == dec!(0)
                 };
 
                 // 4. Safely clean up the dirty tracker list if all deltas are cleared
@@ -139,7 +153,7 @@ impl Cache {
     }
 
     /// Returns the client's document number together with its current balance,
-    /// computed as the persisted base balance plus any in-memory delta that has
+    /// computed as the persisted settled balance plus any in-memory delta that has
     /// not yet been flushed to storage.
     pub async fn get_client_snapshot(
         &self,
@@ -147,12 +161,14 @@ impl Cache {
     ) -> Result<(Document, Decimal), AppError> {
         let clients = self.clients.read().await;
 
-        let (document, balance_mutex) = clients.get(&client_id).ok_or(AppError::ClientNotFound)?;
+        let client_state = clients.get(&client_id).ok_or(AppError::ClientNotFound)?;
 
-        let balance_lock = balance_mutex.lock().await;
-        let (base_balance, current_delta) = &*balance_lock;
+        let balances = client_state.balances.lock().await;
 
-        Ok((document.clone(), *base_balance + *current_delta))
+        Ok((
+            client_state.document.clone(),
+            balances.settled_balance + balances.delta_balance,
+        ))
     }
 
     pub async fn is_document_in_use(&self, document_number: &Document) -> bool {
@@ -162,15 +178,15 @@ impl Cache {
         // Check if the document is already in use
         clients
             .values()
-            .any(|(doc, _balance)| *doc == *document_number)
+            .any(|state| state.document == *document_number)
     }
 
     pub async fn set_document_in_flight(&self, document_number: &Document) -> Result<(), AppError> {
-        let mut in_flight = self.in_flight.lock().await;
-        if in_flight.contains(document_number) {
+        let mut pending_registrations = self.pending_registrations.lock().await;
+        if pending_registrations.contains(document_number) {
             return Err(AppError::DocumentInFlight);
         }
-        in_flight.insert(document_number.clone());
+        pending_registrations.insert(document_number.clone());
 
         Ok(())
     }
@@ -179,33 +195,33 @@ impl Cache {
         &self,
         document_number: &Document,
     ) -> Result<(), AppError> {
-        let mut in_flight = self.in_flight.lock().await;
+        let mut pending_registrations = self.pending_registrations.lock().await;
 
-        in_flight.remove(document_number);
+        pending_registrations.remove(document_number);
 
         Ok(())
     }
 
     pub async fn insert_dirty_client(&self, client_id: Uuid) -> Result<(), AppError> {
-        let mut dirty_clients = self.dirty_clients.lock().await;
+        let mut dirty_client_ids = self.dirty_client_ids.lock().await;
 
-        dirty_clients.insert(client_id);
+        dirty_client_ids.insert(client_id);
 
         Ok(())
     }
 
     pub async fn remove_dirty_client(&self, client_id: &Uuid) -> Result<(), AppError> {
-        let mut dirty_clients = self.dirty_clients.lock().await;
+        let mut dirty_client_ids = self.dirty_client_ids.lock().await;
 
-        dirty_clients.remove(client_id);
+        dirty_client_ids.remove(client_id);
 
         Ok(())
     }
 
     pub async fn get_dirty_clients(&self) -> Result<HashSet<Uuid>, AppError> {
-        let dirty_clients = self.dirty_clients.lock().await;
+        let dirty_client_ids = self.dirty_client_ids.lock().await;
 
-        Ok(dirty_clients.clone())
+        Ok(dirty_client_ids.clone())
     }
 
     /// Collects the current balance deltas for a given set of dirty client IDs.
@@ -220,12 +236,10 @@ impl Cache {
 
         // Iterate and individually look up and lock each client
         for client_id in dirty_clients {
-            if let Some((_doc, inner_mutex)) = clients_read_guard.get(client_id) {
+            if let Some(client_state) = clients_read_guard.get(client_id) {
                 let current_delta = {
-                    let balance_lock = inner_mutex.lock().await;
-
-                    let (_base_balance, current_delta) = &*balance_lock;
-                    *current_delta
+                    let balances = client_state.balances.lock().await;
+                    balances.delta_balance
                 };
 
                 deltas_to_write.push((*client_id, current_delta));
@@ -239,10 +253,10 @@ impl Cache {
 // Nonce operations
 impl Cache {
     pub fn increment_nonce(&self) {
-        self.nonce.fetch_add(1, Relaxed);
+        self.latest_nonce.fetch_add(1, Relaxed);
     }
 
     pub fn get_nonce(&self) -> i32 {
-        self.nonce.load(Relaxed)
+        self.latest_nonce.load(Relaxed)
     }
 }
