@@ -36,7 +36,7 @@ pub struct Cache {
     /// Prevents duplicate sign-up race conditions before they are persisted.
     pending_registrations: Mutex<HashSet<Document>>,
 
-    /// Client IDs whose balance has memory-only changes waiting to be flushed.
+    /// Client IDs with balance changes waiting to be flushed.
     dirty_client_ids: Mutex<HashSet<Uuid>>,
 
     /// Serializes writing operations to guarantee atomic updates and prevent races.
