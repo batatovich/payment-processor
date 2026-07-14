@@ -1,4 +1,4 @@
-use rust_decimal::{Decimal, dec};
+use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::Ordering::Relaxed;
@@ -95,8 +95,8 @@ impl Cache {
             ClientState {
                 document: client.details.document_number.clone(),
                 balances: Mutex::new(ClientBalances {
-                    settled_balance: dec!(0),
-                    delta_balance: dec!(0),
+                    settled_balance: Decimal::ZERO,
+                    delta_balance: Decimal::ZERO,
                 }),
             },
         );
@@ -128,7 +128,7 @@ impl Cache {
                 }
                 TransactionDirection::Debit => {
                     let projected = current - amount;
-                    if projected < dec!(0) {
+                    if projected.is_sign_negative() {
                         return Err(AppError::InsufficientFunds);
                     }
                     balances.delta_balance -= amount;
@@ -186,7 +186,7 @@ impl Cache {
                     let mut balances = client_state.balances.lock().await;
                     balances.settled_balance += delta;
                     balances.delta_balance -= delta;
-                    balances.delta_balance == dec!(0)
+                    balances.delta_balance.is_zero()
                 };
 
                 if fully_settled {

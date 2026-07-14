@@ -1,10 +1,9 @@
 use crate::cache::{Cache, ClientBalances, ClientState, ClientsMap};
-use crate::constants::{CHECKPOINT_HEADER_PREFIX, DATA_DIR, FILE_CLIENTS_METADATA};
+use crate::constants::{DATA_DIR, FILE_CLIENTS_METADATA};
 use crate::error::AppError;
 use crate::model::Client;
-use rust_decimal::{Decimal, dec};
+use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::sync::Mutex;
@@ -12,8 +11,11 @@ use uuid::Uuid;
 
 /// Bootstrapping routine. Runs each time the server starts.
 ///
-/// Hydrates in-memory cache balances by loading the baseline checkpoint (`clients.dat`)
-/// and replaying any subsequent balance change files ("deltas") on top.
+/// Rebuilds balance state from scratch by replaying every delta file in
+/// order, then hydrates the in-memory client cache. No checkpointing —
+/// simple, at the cost of replaying the full delta history on every boot.
+///
+/// For a more sophisticated approach, we could use a checkpoint file to only replay the deltas since the last checkpoint.
 pub fn run() -> Result<Cache, AppError> {
     println!("Bootstrapping system state...");
     let path = Path::new(DATA_DIR);
@@ -21,46 +23,24 @@ pub fn run() -> Result<Cache, AppError> {
 
     init_directory(path, &clients_path)?;
 
-    let delta_files = collect_delta_files(path)?;
-    let latest_nonce = validate_nonce_sequence(delta_files.keys().copied().collect())?;
+    let deltas = scan_delta_files(path)?;
+    let current_nonce = validate_nonce_sequence(deltas.keys().copied().collect())?;
+    let metadata = hydrate_metadata(&clients_path)?;
 
-    let (mut clients, checkpoint_nonce) = hydrate_clients(&clients_path)?;
+    let mut balances = HashMap::new();
+    replay_deltas(&mut balances, &deltas, &metadata)?;
 
-    // If there are newer deltas on disk than what the checkpoint has folded in,
-    // apply them, update the checkpoint baseline, and rewrite it atomically.
-    if latest_nonce > checkpoint_nonce {
-        replay_deltas(&mut clients, &delta_files, checkpoint_nonce, latest_nonce)?;
-        update_client_balances(&clients_path, clients.values(), latest_nonce)?;
-        println!("✅ [CHECKPOINT ADVANCED nonce {checkpoint_nonce} -> {latest_nonce}]");
-    }
-
-    // Convert into active cache registry
-    let clients_map: ClientsMap = clients
-        .into_iter()
-        .map(|(id, client)| {
-            (
-                id,
-                ClientState {
-                    document: client.details.document_number.clone(),
-                    balances: Mutex::new(ClientBalances {
-                        settled_balance: client.balance,
-                        delta_balance: dec!(0),
-                    }),
-                },
-            )
-        })
-        .collect();
-
+    let clients_map = build_clients_map(metadata, &balances);
     println!("✅ [BOOTSTRAP SUCCESS]");
-    Ok(Cache::new(clients_map, latest_nonce as i32))
+    Ok(Cache::new(clients_map, current_nonce as i32))
 }
 
-/// Initializes data directory and empty clients baseline metadata.
+/// Creates the data directory and an empty clients ledger on first run.
 fn init_directory(base_path: &Path, clients_path: &Path) -> Result<(), AppError> {
     if !base_path.exists() {
         fs::create_dir_all(base_path)
             .map_err(|e| AppError::Bootstrap(format!("Failed to create data directory: {e}")))?;
-        fs::write(clients_path, format!("{CHECKPOINT_HEADER_PREFIX}0\n")).map_err(|e| {
+        fs::write(clients_path, "").map_err(|e| {
             AppError::Bootstrap(format!("Failed to initialize {FILE_CLIENTS_METADATA}: {e}"))
         })?;
         println!("✅ [DATA DIRECTORY INITIALIZED]");
@@ -68,13 +48,13 @@ fn init_directory(base_path: &Path, clients_path: &Path) -> Result<(), AppError>
     Ok(())
 }
 
-/// Scans the directory for valid `ddmmyyyy_<nonce>.dat` delta files and catches
-/// interrupted write remnants (orphan .tmp files).
-fn collect_delta_files(path: &Path) -> Result<HashMap<u32, PathBuf>, AppError> {
+/// Single-pass directory scan collecting delta files by nonce. Any orphan
+/// `.tmp` file (an interrupted write) aborts boot.
+fn scan_delta_files(path: &Path) -> Result<HashMap<u32, PathBuf>, AppError> {
     let entries = fs::read_dir(path)
         .map_err(|e| AppError::Bootstrap(format!("Failed to read data directory: {e}")))?;
 
-    let mut delta_files = HashMap::new();
+    let mut deltas = HashMap::new();
 
     for entry in entries.flatten() {
         let p = entry.path();
@@ -82,27 +62,32 @@ fn collect_delta_files(path: &Path) -> Result<HashMap<u32, PathBuf>, AppError> {
             continue;
         }
 
-        if has_extension(&p, "tmp") {
+        let extension = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+
+        if extension.eq_ignore_ascii_case("tmp") {
             return Err(AppError::Bootstrap(
                 "❌ [CRITICAL ERROR] Found orphan .tmp file.".to_string(),
             ));
         }
 
-        if has_extension(&p, "dat") {
-            if let Some(nonce) = extract_nonce_from_filename(&p) {
-                if delta_files.insert(nonce, p).is_some() {
-                    return Err(AppError::Bootstrap(format!(
-                        "❌ [CRITICAL ERROR] Duplicate delta nonce {nonce}."
-                    )));
-                }
+        if !extension.eq_ignore_ascii_case("dat") {
+            continue;
+        }
+
+        if let Some(nonce) = extract_nonce_from_filename(&p) {
+            if deltas.insert(nonce, p).is_some() {
+                return Err(AppError::Bootstrap(format!(
+                    "❌ [CRITICAL ERROR] Duplicate delta nonce {nonce}."
+                )));
             }
         }
     }
 
-    Ok(delta_files)
+    Ok(deltas)
 }
 
-/// Validates that delta nonces form an unbroken sequence from 1 to N.
+/// Validates that nonces form an unbroken, non-duplicate `1..=N` sequence.
+/// Returns `N`, or `0` if there are no deltas yet.
 fn validate_nonce_sequence(mut nonces: Vec<u32>) -> Result<u32, AppError> {
     nonces.sort_unstable();
 
@@ -118,56 +103,41 @@ fn validate_nonce_sequence(mut nonces: Vec<u32>) -> Result<u32, AppError> {
     Ok(nonces.last().copied().unwrap_or(0))
 }
 
-/// Reads the baseline clients checkpoint file and returns current balances + folded nonce.
-fn hydrate_clients(clients_path: &Path) -> Result<(HashMap<Uuid, Client>, u32), AppError> {
+/// Reads the append-only client metadata ledger (name, document, etc).
+/// Does not carry balance — balance is sourced entirely from delta files.
+fn hydrate_metadata(clients_path: &Path) -> Result<HashMap<Uuid, Client>, AppError> {
     let content = fs::read_to_string(clients_path)
         .map_err(|e| AppError::Bootstrap(format!("Failed to read clients from storage: {e}")))?;
 
-    let mut clients = HashMap::new();
-    let mut checkpoint_nonce = 0;
-
+    let mut metadata = HashMap::new();
     for (idx, line) in content.lines().map(str::trim).enumerate() {
         if line.is_empty() {
             continue;
         }
 
-        if let Some(rest) = line.strip_prefix(CHECKPOINT_HEADER_PREFIX) {
-            checkpoint_nonce = rest.trim().parse::<u32>().map_err(|e| {
-                AppError::Bootstrap(format!(
-                    "Invalid checkpoint header at line {}: {e}",
-                    idx + 1
-                ))
-            })?;
-            continue;
-        }
-
-        let client: Client = serde_json::from_str(line).map_err(|e| {
-            AppError::Bootstrap(format!(
-                "Corrupted record inside clients storage at line {}: {e}",
-                idx + 1
-            ))
+        let record: Client = serde_json::from_str(line).map_err(|e| {
+            AppError::Bootstrap(format!("Corrupted metadata at line {}: {e}", idx + 1))
         })?;
-
-        clients.insert(client.client_id, client);
+        metadata.insert(record.client_id, record);
     }
 
-    Ok((clients, checkpoint_nonce))
+    Ok(metadata)
 }
 
-/// Replays balance change lines in sequence, updating client balances.
+/// Replays every delta file, accumulating each client's balance from zero.
+/// Order doesn't matter here — deltas are summed, and `scan_delta_files` /
+/// `validate_nonce_sequence` already guarantee the set has no gaps or dupes.
 fn replay_deltas(
-    clients: &mut HashMap<Uuid, Client>,
-    delta_files: &HashMap<u32, PathBuf>,
-    checkpoint_nonce: u32,
-    latest_nonce: u32,
+    balances: &mut HashMap<Uuid, Decimal>,
+    deltas: &HashMap<u32, PathBuf>,
+    metadata: &HashMap<Uuid, Client>,
 ) -> Result<(), AppError> {
-    for nonce in (checkpoint_nonce + 1)..=latest_nonce {
-        let path = delta_files
-            .get(&nonce)
-            .ok_or_else(|| AppError::Bootstrap(format!("Missing delta file for nonce {nonce}")))?;
-
-        let content = fs::read_to_string(path).map_err(|e| {
-            AppError::Bootstrap(format!("Failed to read delta file for nonce {nonce}: {e}"))
+    for delta_path in deltas.values() {
+        let content = fs::read_to_string(delta_path).map_err(|e| {
+            AppError::Bootstrap(format!(
+                "Failed to read delta file {}: {e}",
+                delta_path.display()
+            ))
         })?;
 
         for (idx, line) in content.lines().map(str::trim).enumerate() {
@@ -175,78 +145,81 @@ fn replay_deltas(
                 continue;
             }
 
-            let (id_str, delta_str) = line.split_once(' ').ok_or_else(|| {
-                AppError::Bootstrap(format!(
-                    "Malformed delta entry at {}:{}",
-                    path.display(),
+            let (client_id, delta) = parse_balance_line(line, delta_path, idx + 1)?;
+            if !metadata.contains_key(&client_id) {
+                return Err(AppError::Bootstrap(format!(
+                    "Delta file {}:{} references unregistered client {client_id}",
+                    delta_path.display(),
                     idx + 1
-                ))
-            })?;
-
-            let client_id = Uuid::parse_str(id_str.trim()).map_err(|e| {
-                AppError::Bootstrap(format!(
-                    "Invalid client ID in delta file {}:{}: {e}",
-                    path.display(),
-                    idx + 1
-                ))
-            })?;
-
-            let delta = Decimal::from_str_exact(delta_str.trim()).map_err(|e| {
-                AppError::Bootstrap(format!(
-                    "Invalid delta amount in file {}:{}: {e}",
-                    path.display(),
-                    idx + 1
-                ))
-            })?;
-
-            let client = clients.get_mut(&client_id).ok_or_else(|| {
-                AppError::Bootstrap(format!(
-                    "Delta file {}:{} references unknown client {client_id}",
-                    path.display(),
-                    idx + 1
-                ))
-            })?;
-
-            client.balance += delta;
+                )));
+            }
+            *balances.entry(client_id).or_insert(Decimal::ZERO) += delta;
         }
     }
 
     Ok(())
 }
 
-/// Writes client baseline checkpoint atomically using a tmp file swap.
-fn update_client_balances<'a>(
-    clients_path: &Path,
-    clients: impl Iterator<Item = &'a Client>,
-    checkpoint_nonce: u32,
-) -> Result<(), AppError> {
-    let mut buf = String::new();
-    let _ = writeln!(buf, "{CHECKPOINT_HEADER_PREFIX}{checkpoint_nonce}");
-
-    for client in clients {
-        let record = serde_json::to_string(client)?;
-        buf.push_str(&record);
-        buf.push('\n');
-    }
-
-    let path_tmp = clients_path.with_file_name(format!("{FILE_CLIENTS_METADATA}.tmp"));
-    fs::write(&path_tmp, buf.as_bytes())
-        .map_err(|e| AppError::Bootstrap(format!("Failed to write checkpoint: {e}")))?;
-
-    fs::rename(&path_tmp, clients_path)
-        .map_err(|e| AppError::Bootstrap(format!("Failed to commit checkpoint: {e}")))?;
-
-    Ok(())
+/// Merges client metadata with replayed balances into the final in-memory cache map.
+fn build_clients_map(
+    metadata: HashMap<Uuid, Client>,
+    balances: &HashMap<Uuid, Decimal>,
+) -> ClientsMap {
+    metadata
+        .into_iter()
+        .map(|(id, meta)| {
+            let settled_balance = balances.get(&id).copied().unwrap_or(Decimal::ZERO);
+            (
+                id,
+                ClientState {
+                    document: meta.details.document_number,
+                    balances: Mutex::new(ClientBalances {
+                        settled_balance,
+                        delta_balance: Decimal::ZERO,
+                    }),
+                },
+            )
+        })
+        .collect()
 }
 
+/// Parses a single `<uuid> <decimal>` ledger line.
+fn parse_balance_line(
+    line: &str,
+    source: &Path,
+    line_no: usize,
+) -> Result<(Uuid, Decimal), AppError> {
+    let (id_str, value_str) = line.split_once(' ').ok_or_else(|| {
+        AppError::Bootstrap(format!(
+            "Malformed entry at {}:{}",
+            source.display(),
+            line_no
+        ))
+    })?;
+
+    let client_id = Uuid::parse_str(id_str.trim()).map_err(|e| {
+        AppError::Bootstrap(format!(
+            "Invalid client ID at {}:{}: {e}",
+            source.display(),
+            line_no
+        ))
+    })?;
+
+    let value = Decimal::from_str_exact(value_str.trim()).map_err(|e| {
+        AppError::Bootstrap(format!(
+            "Invalid decimal value at {}:{}: {e}",
+            source.display(),
+            line_no
+        ))
+    })?;
+
+    Ok((client_id, value))
+}
+
+/// Extracts the nonce from a delta filename matching `ddmmyyyy_<nonce>.dat`.
 fn extract_nonce_from_filename(file_path: &Path) -> Option<u32> {
     let stem = file_path.file_stem()?.to_str()?;
-    let (_, counter_str) = stem.split_once('_')?;
+    let (date_str, counter_str) = stem.split_once('_')?;
+    chrono::NaiveDate::parse_from_str(date_str, "%d%m%Y").ok()?;
     counter_str.parse::<u32>().ok()
-}
-
-fn has_extension(path: &Path, ext: &str) -> bool {
-    path.extension()
-        .and_then(|s| s.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case(ext))
 }
