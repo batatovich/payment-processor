@@ -81,7 +81,10 @@ impl Cache {
     /// Releases a reserved document number once registration finishes, whether it
     /// succeeded or failed.
     pub async fn release_document(&self, document_number: &Document) {
-        self.pending_registrations.lock().await.remove(document_number);
+        self.pending_registrations
+            .lock()
+            .await
+            .remove(document_number);
     }
 
     /// Inserts a newly registered client, seeding it with its settled balance and a zero delta.
@@ -139,10 +142,7 @@ impl Cache {
     }
 
     /// Returns the client's document number and current balance (settled + pending delta).
-    pub async fn get_client_state(
-        &self,
-        client_id: Uuid,
-    ) -> Result<(Document, Decimal), AppError> {
+    pub async fn get_client_state(&self, client_id: Uuid) -> Result<(Document, Decimal), AppError> {
         let clients = self.clients.read().await;
         let client_state = clients.get(&client_id).ok_or(AppError::ClientNotFound)?;
 

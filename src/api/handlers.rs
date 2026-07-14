@@ -85,13 +85,11 @@ pub async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder, A
 
     let nonce = cache.get_nonce() + 1;
 
-    // Write the ledger file recording this batch of deltas.
-    // If anything here fails, the cache was never modified and we could retry the operation if needed.
+    // Append the ledger file recording this batch of deltas. This is the sole
+    // durability point for balance changes between checkpoints: bootstrap replays
+    // these ledgers on top of clients.dat, so no full metadata rewrite is needed here.
+    // If this fails, the cache was never modified and the operation can be retried.
     storage::save_balance_changes(nonce, &balance_changes).await?;
-
-    // Fold the same deltas into the canonical clients metadata file so the updated
-    // balances survive a restart (bootstrap hydrates settled balances from clients.dat).
-    storage::update_client_balances(&balance_changes).await?;
 
     cache.apply_persisted_deltas(&balance_changes).await;
 

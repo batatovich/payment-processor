@@ -2,7 +2,6 @@ use crate::constants::{DATA_DIR, FILE_CLIENTS_METADATA};
 use crate::error::AppError;
 use crate::model::Client;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::Path;
 use tokio::fs;
@@ -31,10 +30,10 @@ pub async fn save_client_to_storage(client: &Client) -> Result<(), AppError> {
 }
 
 /// Writes balance changes to storage.
-/// 
+///
 /// Filename format: {date}_{nonce}.dat
 /// Data format: {client_id} {balance_change}
-/// 
+///
 /// The data is written to a .tmp file and then renamed to the final filename to ensure all data is written.
 pub async fn save_balance_changes(
     nonce: i32,
@@ -61,67 +60,6 @@ pub async fn save_balance_changes(
     writer.write_all(buf.as_bytes()).await?;
 
     // Flush the buffer
-    writer.flush().await?;
-
-    // Atomically rename the file
-    fs::rename(&path_tmp, &path).await?;
-
-    Ok(())
-}
-
-/// Folds persisted balance deltas into the canonical clients metadata file.
-///
-/// Bootstrap hydrates each client's settled balance solely from `clients.dat`, so
-/// the ledger deltas must be merged back here for balances to survive a restart.
-/// The file is rewritten via a temp file + atomic rename to avoid leaving the
-/// canonical record in a partially written state.
-pub async fn update_client_balances(
-    balance_changes: &Vec<(Uuid, Decimal)>,
-) -> Result<(), AppError> {
-    // Index the deltas by client for O(1) lookups while streaming the file.
-    // Skip net-zero deltas: a client can be dirty yet have no effective balance
-    // change (e.g. a credit cancelled out by a debit), and we only want to touch
-    // clients whose balance actually moved.
-    let deltas: HashMap<Uuid, Decimal> = balance_changes
-        .iter()
-        .filter(|(_, delta)| !delta.is_zero())
-        .copied()
-        .collect();
-
-    // Nothing moved, so there's no reason to rewrite the canonical file.
-    if deltas.is_empty() {
-        return Ok(());
-    }
-
-    let data_dir = Path::new(DATA_DIR);
-    let path = data_dir.join(FILE_CLIENTS_METADATA);
-    let path_tmp = data_dir.join(format!("{FILE_CLIENTS_METADATA}.tmp"));
-
-    let content = fs::read_to_string(&path).await?;
-
-    let mut buf = String::with_capacity(content.len());
-    for line in content.lines().map(str::trim) {
-        if line.is_empty() {
-            continue;
-        }
-
-        let mut client: Client = serde_json::from_str(line)?;
-        if let Some(delta) = deltas.get(&client.client_id) {
-            client.balance += *delta;
-        }
-
-        let record = serde_json::to_string(&client)?;
-        buf.push_str(&record);
-        buf.push('\n');
-    }
-
-    let file_tmp = fs::File::create(&path_tmp).await?;
-
-    // Use BufWriter to keep disk writes batch-buffered in memory
-    let mut writer = BufWriter::new(file_tmp);
-    writer.write_all(buf.as_bytes()).await?;
-
-    // Flush the remaining buffer to disk
     writer.flush().await?;
 
     // Atomically rename the file
