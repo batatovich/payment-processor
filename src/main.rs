@@ -1,9 +1,9 @@
 mod api;
 mod bootstrap;
+mod cache;
 mod constants;
 mod error;
 mod model;
-mod cache;
 mod storage;
 
 use actix_web::{App, HttpServer, web};

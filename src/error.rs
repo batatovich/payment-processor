@@ -23,12 +23,12 @@ pub enum AppError {
     #[error("Serialization failure: {0}")]
     Serde(#[from] serde_json::Error),
 
-    /// Startup-time failures (missing control files, corrupted storage, nonce
-    /// mismatches, etc.)
+    /// Startup-time failures
     #[error("Bootstrap failure: {0}")]
     Bootstrap(String),
 }
 
+// Implement the ResponseError trait to convert the AppError into an Actix error
 impl ResponseError for AppError {
     fn status_code(&self) -> StatusCode {
         match self {
