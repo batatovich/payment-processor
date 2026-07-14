@@ -5,19 +5,20 @@ use std::sync::atomic::Ordering::Relaxed;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
+use crate::api::dto::NewClientBody as ClientDetails;
 use crate::error::AppError;
 use crate::model::{Client, Document, TransactionDirection};
 
 /// Represents the in-memory state of a single client.
-pub struct ClientState {
-    pub document: Document,
+pub struct ClientCache {
+    pub client_details: ClientDetails,
     /// The client's running balance. Starts at zero on boot, accumulates credits
     /// and debits (may go negative), and is flushed back to zero whenever it is
     /// persisted by `store_balances`.
     pub balance: Mutex<Decimal>,
 }
 
-pub type ClientsMap = HashMap<Uuid, ClientState>;
+pub type ClientsMap = HashMap<Uuid, ClientCache>;
 
 // Shared App State
 pub struct Cache {
@@ -59,7 +60,7 @@ impl Cache {
         let clients = self.clients.read().await;
         clients
             .values()
-            .any(|state| state.document == *document_number)
+            .any(|client_cache| client_cache.client_details.document_number == *document_number)
     }
 
     /// Reserves a document number for an in-progress registration, rejecting a
@@ -87,8 +88,8 @@ impl Cache {
         let mut clients = self.clients.write().await;
         clients.insert(
             client.client_id,
-            ClientState {
-                document: client.details.document_number.clone(),
+            ClientCache {
+                client_details: client.details.clone(),
                 balance: Mutex::new(Decimal::ZERO),
             },
         );
@@ -128,7 +129,7 @@ impl Cache {
         let client_state = clients.get(&client_id).ok_or(AppError::ClientNotFound)?;
 
         let balance = *client_state.balance.lock().await;
-        Ok((client_state.document.clone(), balance))
+        Ok((client_state.client_details.document_number.clone(), balance))
     }
 }
 

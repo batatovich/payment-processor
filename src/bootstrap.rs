@@ -1,4 +1,4 @@
-use crate::cache::{Cache, ClientState, ClientsMap};
+use crate::cache::{Cache, ClientCache, ClientsMap};
 use crate::constants::{DATA_DIR, FILE_CLIENTS_METADATA};
 use crate::error::AppError;
 use crate::model::Client;
@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::sync::Mutex;
-use uuid::Uuid;
 
 /// Bootstrapping routine. Runs each time the server starts.
 ///
@@ -23,9 +22,8 @@ pub fn run() -> Result<Cache, AppError> {
 
     let balance_files = scan_balance_files(path)?;
     let current_nonce = validate_nonce_sequence(balance_files.keys().copied().collect())?;
-    let metadata = hydrate_metadata(&clients_path)?;
 
-    let clients_map = build_clients_map(metadata);
+    let clients_map = hydrate_clients(&clients_path)?;
     println!("✅ [BOOTSTRAP SUCCESS]");
     Ok(Cache::new(clients_map, current_nonce as i32))
 }
@@ -98,13 +96,14 @@ fn validate_nonce_sequence(mut nonces: Vec<u32>) -> Result<u32, AppError> {
     Ok(nonces.last().copied().unwrap_or(0))
 }
 
-/// Reads the append-only client metadata ledger (name, document, etc).
-/// Does not carry balance — every client starts at a zero balance on boot.
-fn hydrate_metadata(clients_path: &Path) -> Result<HashMap<Uuid, Client>, AppError> {
+/// Reads the append-only client metadata ledger (name, document, etc) and builds
+/// the in-memory cache map, seeding every client with a zero balance — balances
+/// always start at zero on boot.
+fn hydrate_clients(clients_path: &Path) -> Result<ClientsMap, AppError> {
     let content = fs::read_to_string(clients_path)
         .map_err(|e| AppError::Bootstrap(format!("Failed to read clients from storage: {e}")))?;
 
-    let mut metadata = HashMap::new();
+    let mut clients = ClientsMap::new();
     for (idx, line) in content.lines().map(str::trim).enumerate() {
         if line.is_empty() {
             continue;
@@ -113,27 +112,17 @@ fn hydrate_metadata(clients_path: &Path) -> Result<HashMap<Uuid, Client>, AppErr
         let record: Client = serde_json::from_str(line).map_err(|e| {
             AppError::Bootstrap(format!("Corrupted metadata at line {}: {e}", idx + 1))
         })?;
-        metadata.insert(record.client_id, record);
+
+        clients.insert(
+            record.client_id,
+            ClientCache {
+                client_details: record.details,
+                balance: Mutex::new(Decimal::ZERO),
+            },
+        );
     }
 
-    Ok(metadata)
-}
-
-/// Builds the in-memory cache map from client metadata, seeding every client
-/// with a zero balance.
-fn build_clients_map(metadata: HashMap<Uuid, Client>) -> ClientsMap {
-    metadata
-        .into_iter()
-        .map(|(id, meta)| {
-            (
-                id,
-                ClientState {
-                    document: meta.details.document_number,
-                    balance: Mutex::new(Decimal::ZERO),
-                },
-            )
-        })
-        .collect()
+    Ok(clients)
 }
 
 /// Extracts the nonce from a balance filename matching `ddmmyyyy_<nonce>.dat`.
