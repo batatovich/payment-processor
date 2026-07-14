@@ -2,6 +2,7 @@ use crate::constants::{DATA_DIR, FILE_CLIENTS_METADATA};
 use crate::error::AppError;
 use crate::model::Client;
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
 use std::io::{BufWriter, Write as IoWrite};
@@ -57,6 +58,59 @@ pub async fn save_balance_changes(
 
     // Offload the write to a dedicated blocking thread.
     task::spawn_blocking(move || -> Result<(), AppError> {
+        let file_tmp = fs::File::create(&path_tmp)?;
+
+        // Use BufWriter to keep disk writes batch-buffered in memory
+        let mut writer = BufWriter::new(file_tmp);
+        writer.write_all(buf.as_bytes())?;
+
+        // Flush the remaining buffer to disk
+        writer.flush()?;
+
+        // Atomically rename the file
+        fs::rename(&path_tmp, &path)?;
+
+        Ok(())
+    })
+    .await?
+}
+
+/// Folds persisted balance deltas into the canonical clients metadata file.
+///
+/// Bootstrap hydrates each client's settled balance solely from `clients.dat`, so
+/// the ledger deltas must be merged back here for balances to survive a restart.
+/// The file is rewritten via a temp file + atomic rename to avoid leaving the
+/// canonical record in a partially written state.
+pub async fn update_client_balances(
+    balance_changes: &Vec<(Uuid, Decimal)>,
+) -> Result<(), AppError> {
+    // Index the deltas by client for O(1) lookups while streaming the file.
+    let deltas: HashMap<Uuid, Decimal> = balance_changes.iter().copied().collect();
+
+    let data_dir = Path::new(DATA_DIR);
+    let path = data_dir.join(FILE_CLIENTS_METADATA);
+    let path_tmp = data_dir.join(format!("{FILE_CLIENTS_METADATA}.tmp"));
+
+    // Offload the read/rewrite to a dedicated blocking thread.
+    task::spawn_blocking(move || -> Result<(), AppError> {
+        let content = fs::read_to_string(&path)?;
+
+        let mut buf = String::with_capacity(content.len());
+        for line in content.lines().map(str::trim) {
+            if line.is_empty() {
+                continue;
+            }
+
+            let mut client: Client = serde_json::from_str(line)?;
+            if let Some(delta) = deltas.get(&client.client_id) {
+                client.balance += *delta;
+            }
+
+            let record = serde_json::to_string(&client)?;
+            buf.push_str(&record);
+            buf.push('\n');
+        }
+
         let file_tmp = fs::File::create(&path_tmp)?;
 
         // Use BufWriter to keep disk writes batch-buffered in memory
