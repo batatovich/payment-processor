@@ -57,8 +57,34 @@ impl Cache {
     }
 }
 
+// Client registration
 impl Cache {
-    /// Inserts a new client into the cache, initializing its balance with a zero delta.
+    /// Returns whether a document number already belongs to a registered client.
+    pub async fn is_document_in_use(&self, document_number: &Document) -> bool {
+        let clients = self.clients.read().await;
+        clients
+            .values()
+            .any(|state| state.document == *document_number)
+    }
+
+    /// Reserves a document number for an in-progress registration, rejecting a
+    /// concurrent sign-up that races on the same document before it is persisted.
+    pub async fn reserve_document(&self, document_number: &Document) -> Result<(), AppError> {
+        let mut pending = self.pending_registrations.lock().await;
+        if pending.contains(document_number) {
+            return Err(AppError::DocumentInFlight);
+        }
+        pending.insert(document_number.clone());
+        Ok(())
+    }
+
+    /// Releases a reserved document number once registration finishes, whether it
+    /// succeeded or failed.
+    pub async fn release_document(&self, document_number: &Document) {
+        self.pending_registrations.lock().await.remove(document_number);
+    }
+
+    /// Inserts a newly registered client, seeding it with its settled balance and a zero delta.
     pub async fn insert_client(&self, client: &Client) {
         let mut clients = self.clients.write().await;
         clients.insert(
@@ -72,185 +98,111 @@ impl Cache {
             },
         );
     }
+}
 
+// Balance operations
+impl Cache {
+    /// Applies a credit or debit to a client's in-memory delta and returns the resulting
+    /// balance. Debits that would overdraw the account are rejected, leaving it untouched.
     pub async fn apply_balance_change(
         &self,
         client_id: Uuid,
-        delta: Decimal,
+        amount: Decimal,
         direction: TransactionDirection,
     ) -> Result<Decimal, AppError> {
-        // Acquire outer lock in read mode.
-        // No other task can add or remove elements to the hashmap while we hold this lock
+        // Read lock keeps the map stable; only registration takes the write lock.
         let clients = self.clients.read().await;
+        let client_state = clients.get(&client_id).ok_or(AppError::ClientNotFound)?;
 
-        if let Some(client_state) = clients.get(&client_id) {
-            let result = {
-                // Lock this client's balances
-                let mut balances = client_state.balances.lock().await;
+        let new_balance = {
+            let mut balances = client_state.balances.lock().await;
+            let current = balances.settled_balance + balances.delta_balance;
 
-                match direction {
-                    TransactionDirection::Credit => {
-                        let new_balance = balances.settled_balance + balances.delta_balance + delta;
-                        balances.delta_balance += delta;
-                        Ok(new_balance)
-                    }
-                    TransactionDirection::Debit => {
-                        let new_balance = balances.settled_balance + balances.delta_balance - delta;
-                        if new_balance >= dec!(0) {
-                            balances.delta_balance -= delta;
-                            Ok(new_balance)
-                        } else {
-                            return Err(AppError::InsufficientFunds);
-                        }
-                    }
+            match direction {
+                TransactionDirection::Credit => {
+                    balances.delta_balance += amount;
+                    current + amount
                 }
-
-                // balances lock is dropped when leaving this scope
-            };
-
-            // If we successfully updated the client delta in the cache, add it to the dirty clients list
-            if result.is_ok() {
-                self.insert_dirty_client(client_id).await?;
-            }
-
-            return result;
-        } else {
-            return Err(AppError::ClientNotFound);
-        }
-    }
-
-    pub async fn apply_persisted_deltas(
-        &self,
-        clear_deltas: &[(Uuid, Decimal)],
-    ) -> Result<(), AppError> {
-        // Acquire the outer async RwLock read guard
-        let clients_read_guard = self.clients.read().await;
-
-        // Once we got the outer rwlock, we lock the std mutex of dirty clients to update the balance and delta
-        let mut dirty_guard = self.dirty_client_ids.lock().await;
-
-        // Iterate over the clients we just successfully persisted to storage
-        for (client_id, delta) in clear_deltas {
-            if let Some(client_state) = clients_read_guard.get(client_id) {
-                // Isolate the synchronous client lock inside a block so it releases immediately
-                let is_delta_zero = {
-                    let mut balances = client_state.balances.lock().await;
-
-                    balances.settled_balance += delta;
-                    balances.delta_balance -= delta;
-
-                    balances.delta_balance == dec!(0)
-                };
-
-                // 4. Safely clean up the dirty tracker list if all deltas are cleared
-                if is_delta_zero {
-                    dirty_guard.remove(client_id);
+                TransactionDirection::Debit => {
+                    let projected = current - amount;
+                    if projected < dec!(0) {
+                        return Err(AppError::InsufficientFunds);
+                    }
+                    balances.delta_balance -= amount;
+                    projected
                 }
             }
-        }
+        };
 
-        Ok(())
+        self.mark_dirty(client_id).await;
+        Ok(new_balance)
     }
 
-    /// Returns the client's document number together with its current balance,
-    /// computed as the persisted settled balance plus any in-memory delta that has
-    /// not yet been flushed to storage.
-    pub async fn get_client_snapshot(
+    /// Returns the client's document number and current balance (settled + pending delta).
+    pub async fn get_client_state(
         &self,
         client_id: Uuid,
     ) -> Result<(Document, Decimal), AppError> {
         let clients = self.clients.read().await;
-
         let client_state = clients.get(&client_id).ok_or(AppError::ClientNotFound)?;
 
         let balances = client_state.balances.lock().await;
-
         Ok((
             client_state.document.clone(),
             balances.settled_balance + balances.delta_balance,
         ))
     }
+}
 
-    pub async fn is_document_in_use(&self, document_number: &Document) -> bool {
-        // Read lock
+// Persistence / flush
+impl Cache {
+    /// Snapshots the pending delta of every dirty client, producing the batch to be
+    /// written to the next ledger file.
+    pub async fn snapshot_dirty_deltas(&self) -> Vec<(Uuid, Decimal)> {
+        // Copy the dirty id set and release its lock before touching client balances.
+        let dirty_ids = self.dirty_client_ids.lock().await.clone();
+
         let clients = self.clients.read().await;
-
-        // Check if the document is already in use
-        clients
-            .values()
-            .any(|state| state.document == *document_number)
-    }
-
-    pub async fn set_document_in_flight(&self, document_number: &Document) -> Result<(), AppError> {
-        let mut pending_registrations = self.pending_registrations.lock().await;
-        if pending_registrations.contains(document_number) {
-            return Err(AppError::DocumentInFlight);
-        }
-        pending_registrations.insert(document_number.clone());
-
-        Ok(())
-    }
-
-    pub async fn remove_document_in_flight(
-        &self,
-        document_number: &Document,
-    ) -> Result<(), AppError> {
-        let mut pending_registrations = self.pending_registrations.lock().await;
-
-        pending_registrations.remove(document_number);
-
-        Ok(())
-    }
-
-    pub async fn insert_dirty_client(&self, client_id: Uuid) -> Result<(), AppError> {
-        let mut dirty_client_ids = self.dirty_client_ids.lock().await;
-
-        dirty_client_ids.insert(client_id);
-
-        Ok(())
-    }
-
-    pub async fn remove_dirty_client(&self, client_id: &Uuid) -> Result<(), AppError> {
-        let mut dirty_client_ids = self.dirty_client_ids.lock().await;
-
-        dirty_client_ids.remove(client_id);
-
-        Ok(())
-    }
-
-    pub async fn get_dirty_clients(&self) -> Result<HashSet<Uuid>, AppError> {
-        let dirty_client_ids = self.dirty_client_ids.lock().await;
-
-        Ok(dirty_client_ids.clone())
-    }
-
-    /// Collects the current balance deltas for a given set of dirty client IDs.
-    pub async fn collect_batch_deltas(
-        &self,
-        dirty_clients: &HashSet<Uuid>,
-    ) -> Result<Vec<(Uuid, Decimal)>, AppError> {
-        // Acquire the outer async RwLock read guard
-        let clients_read_guard = self.clients.read().await;
-
-        let mut deltas_to_write = Vec::with_capacity(dirty_clients.len());
-
-        // Iterate and individually look up and lock each client
-        for client_id in dirty_clients {
-            if let Some(client_state) = clients_read_guard.get(client_id) {
-                let current_delta = {
-                    let balances = client_state.balances.lock().await;
-                    balances.delta_balance
-                };
-
-                deltas_to_write.push((*client_id, current_delta));
+        let mut deltas = Vec::with_capacity(dirty_ids.len());
+        for client_id in dirty_ids {
+            if let Some(client_state) = clients.get(&client_id) {
+                let delta = client_state.balances.lock().await.delta_balance;
+                deltas.push((client_id, delta));
             }
         }
+        deltas
+    }
 
-        Ok(deltas_to_write)
+    /// Folds persisted deltas into each client's settled balance, clearing a client
+    /// from the dirty set once its delta is fully settled.
+    pub async fn apply_persisted_deltas(&self, persisted_deltas: &[(Uuid, Decimal)]) {
+        let clients = self.clients.read().await;
+        let mut dirty_ids = self.dirty_client_ids.lock().await;
+
+        for (client_id, delta) in persisted_deltas {
+            if let Some(client_state) = clients.get(client_id) {
+                // Isolate the balances lock so it releases before the next iteration.
+                let fully_settled = {
+                    let mut balances = client_state.balances.lock().await;
+                    balances.settled_balance += delta;
+                    balances.delta_balance -= delta;
+                    balances.delta_balance == dec!(0)
+                };
+
+                if fully_settled {
+                    dirty_ids.remove(client_id);
+                }
+            }
+        }
+    }
+
+    /// Flags a client as having in-memory changes awaiting persistence.
+    async fn mark_dirty(&self, client_id: Uuid) {
+        self.dirty_client_ids.lock().await.insert(client_id);
     }
 }
 
-// Nonce operations
+// Nonce
 impl Cache {
     pub fn increment_nonce(&self) {
         self.latest_nonce.fetch_add(1, Relaxed);

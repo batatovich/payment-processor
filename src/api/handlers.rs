@@ -41,26 +41,26 @@ pub async fn new_client(
         return Err(AppError::DocumentInUse);
     }
 
-    // Set document in-flight to mark that this client is being created and has yet to be persisted to storage.
+    // Reserve the document to mark that this client is being created and has yet to be persisted to storage.
     // The cache will only reflect the new client once its safely saved to storage.
-    cache.set_document_in_flight(document_number).await?;
+    cache.reserve_document(document_number).await?;
 
     // New Client
     let new_client = Client::new(body);
 
     // Write the new client to storage
-    // If this returns an error, the client document will be removed from the in_flight cache
-    // and never added to the clients cache
+    // If this returns an error, the reserved document is released
+    // and the client is never added to the clients cache
     if let Err(e) = storage::save_client_to_storage(&new_client).await {
-        cache.remove_document_in_flight(document_number).await?;
+        cache.release_document(document_number).await;
         return Err(e);
     }
 
     // Add the new client to the clients cache
     cache.insert_client(&new_client).await;
 
-    // Remove new client document from in-flight cache
-    cache.remove_document_in_flight(document_number).await?;
+    // Release the reserved document now that registration is complete
+    cache.release_document(document_number).await;
 
     // Return the client id
     Ok(HttpResponse::Ok().json(new_client.client_id.to_string()))
@@ -75,14 +75,13 @@ pub async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder, A
     // and only there can another task try to store balances again.
     let _store_guard = cache.persistence_lock.lock().await;
 
-    // Snapshot which clients have balance changes to save
-    let dirty_clients = cache.get_dirty_clients().await?;
+    // Snapshot the pending balance changes to persist.
+    let balance_changes = cache.snapshot_dirty_deltas().await;
 
-    // Early return if no news
-    if dirty_clients.is_empty() {
+    // Early return if there's nothing new to write.
+    if balance_changes.is_empty() {
         return Ok(HttpResponse::Ok().finish());
     }
-    let balance_changes = cache.collect_batch_deltas(&dirty_clients).await?;
 
     let nonce = cache.get_nonce() + 1;
 
@@ -90,7 +89,7 @@ pub async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder, A
     // If anything here fails, the cache was never modified and we could retry the operation if needed.
     storage::save_balance_changes(nonce, &balance_changes).await?;
 
-    cache.apply_persisted_deltas(&balance_changes).await?;
+    cache.apply_persisted_deltas(&balance_changes).await;
 
     cache.increment_nonce();
 
@@ -136,7 +135,7 @@ pub async fn get_balance(
 ) -> Result<impl Responder, AppError> {
     let client_id = query.client_id;
 
-    let (document_number, balance) = cache.get_client_snapshot(client_id).await?;
+    let (document_number, balance) = cache.get_client_state(client_id).await?;
 
     Ok(HttpResponse::Ok().json(GetBalanceResponse {
         client_id,
