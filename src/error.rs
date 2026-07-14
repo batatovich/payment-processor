@@ -1,7 +1,6 @@
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 use serde_json::json;
 use thiserror::Error;
-use tokio::task::JoinError;
 
 /// Central application error type.
 #[derive(Debug, Error)]
@@ -46,11 +45,5 @@ impl ResponseError for AppError {
         HttpResponse::build(self.status_code()).json(json!({
             "error": self.to_string(),
         }))
-    }
-}
-
-impl From<JoinError> for AppError {
-    fn from(error: JoinError) -> Self {
-        AppError::Io(error.into())
     }
 }

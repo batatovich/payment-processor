@@ -4,16 +4,12 @@ use crate::model::Client;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::fs;
-use std::io::{BufWriter, Write as IoWrite};
 use std::path::Path;
-use tokio::task;
+use tokio::fs;
+use tokio::io::{AsyncWriteExt, BufWriter};
 use uuid::Uuid;
 
 /// Appends a single client record to storage.
-///
-/// Serialization runs on the async task; the blocking file I/O is offloaded to a
-/// dedicated blocking thread, so callers can simply `.await` this safely.
 pub async fn save_client_to_storage(client: &Client) -> Result<(), AppError> {
     // Serialize the `Client` struct (cheap, in-memory work)
     let mut serialized = serde_json::to_string(client)?;
@@ -21,28 +17,29 @@ pub async fn save_client_to_storage(client: &Client) -> Result<(), AppError> {
 
     let file_path = Path::new(DATA_DIR).join(FILE_CLIENTS_METADATA);
 
-    // Offload the blocking write onto a dedicated thread.
-    task::spawn_blocking(move || -> Result<(), AppError> {
-        // Open file in append mode
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .append(true)
-            .open(file_path)?;
+    // Open file in append mode
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .append(true)
+        .open(file_path)
+        .await?;
 
-        file.write_all(serialized.as_bytes())?;
-        file.flush()?;
+    file.write_all(serialized.as_bytes()).await?;
+    file.flush().await?;
 
-        Ok(())
-    })
-    .await?
+    Ok(())
 }
 
-/// Writes balance changes atomically using a temporary file.
+/// Writes balance changes to storage.
+/// 
+/// Filename format: {date}_{nonce}.dat
+/// Data format: {client_id} {balance_change}
+/// 
+/// The data is written to a .tmp file and then renamed to the final filename to ensure all data is written.
 pub async fn save_balance_changes(
     nonce: i32,
     balance_changes: &Vec<(Uuid, Decimal)>,
 ) -> Result<(), AppError> {
-    // Build the full payload up front
     let mut buf = String::new();
     for (client_id, delta) in balance_changes {
         let _ = writeln!(buf, "{} {}", client_id, delta);
@@ -56,23 +53,20 @@ pub async fn save_balance_changes(
     let path: std::path::PathBuf = data_dir.join(&file_name);
     let path_tmp = data_dir.join(&file_name_tmp);
 
-    // Offload the write to a dedicated blocking thread.
-    task::spawn_blocking(move || -> Result<(), AppError> {
-        let file_tmp = fs::File::create(&path_tmp)?;
+    // Create the temporary file
+    let file_tmp = fs::File::create(&path_tmp).await?;
 
-        // Use BufWriter to keep disk writes batch-buffered in memory
-        let mut writer = BufWriter::new(file_tmp);
-        writer.write_all(buf.as_bytes())?;
+    // Write the data to the temporary file
+    let mut writer = BufWriter::new(file_tmp);
+    writer.write_all(buf.as_bytes()).await?;
 
-        // Flush the remaining buffer to disk
-        writer.flush()?;
+    // Flush the buffer
+    writer.flush().await?;
 
-        // Atomically rename the file
-        fs::rename(&path_tmp, &path)?;
+    // Atomically rename the file
+    fs::rename(&path_tmp, &path).await?;
 
-        Ok(())
-    })
-    .await?
+    Ok(())
 }
 
 /// Folds persisted balance deltas into the canonical clients metadata file.
@@ -85,45 +79,53 @@ pub async fn update_client_balances(
     balance_changes: &Vec<(Uuid, Decimal)>,
 ) -> Result<(), AppError> {
     // Index the deltas by client for O(1) lookups while streaming the file.
-    let deltas: HashMap<Uuid, Decimal> = balance_changes.iter().copied().collect();
+    // Skip net-zero deltas: a client can be dirty yet have no effective balance
+    // change (e.g. a credit cancelled out by a debit), and we only want to touch
+    // clients whose balance actually moved.
+    let deltas: HashMap<Uuid, Decimal> = balance_changes
+        .iter()
+        .filter(|(_, delta)| !delta.is_zero())
+        .copied()
+        .collect();
+
+    // Nothing moved, so there's no reason to rewrite the canonical file.
+    if deltas.is_empty() {
+        return Ok(());
+    }
 
     let data_dir = Path::new(DATA_DIR);
     let path = data_dir.join(FILE_CLIENTS_METADATA);
     let path_tmp = data_dir.join(format!("{FILE_CLIENTS_METADATA}.tmp"));
 
-    // Offload the read/rewrite to a dedicated blocking thread.
-    task::spawn_blocking(move || -> Result<(), AppError> {
-        let content = fs::read_to_string(&path)?;
+    let content = fs::read_to_string(&path).await?;
 
-        let mut buf = String::with_capacity(content.len());
-        for line in content.lines().map(str::trim) {
-            if line.is_empty() {
-                continue;
-            }
-
-            let mut client: Client = serde_json::from_str(line)?;
-            if let Some(delta) = deltas.get(&client.client_id) {
-                client.balance += *delta;
-            }
-
-            let record = serde_json::to_string(&client)?;
-            buf.push_str(&record);
-            buf.push('\n');
+    let mut buf = String::with_capacity(content.len());
+    for line in content.lines().map(str::trim) {
+        if line.is_empty() {
+            continue;
         }
 
-        let file_tmp = fs::File::create(&path_tmp)?;
+        let mut client: Client = serde_json::from_str(line)?;
+        if let Some(delta) = deltas.get(&client.client_id) {
+            client.balance += *delta;
+        }
 
-        // Use BufWriter to keep disk writes batch-buffered in memory
-        let mut writer = BufWriter::new(file_tmp);
-        writer.write_all(buf.as_bytes())?;
+        let record = serde_json::to_string(&client)?;
+        buf.push_str(&record);
+        buf.push('\n');
+    }
 
-        // Flush the remaining buffer to disk
-        writer.flush()?;
+    let file_tmp = fs::File::create(&path_tmp).await?;
 
-        // Atomically rename the file
-        fs::rename(&path_tmp, &path)?;
+    // Use BufWriter to keep disk writes batch-buffered in memory
+    let mut writer = BufWriter::new(file_tmp);
+    writer.write_all(buf.as_bytes()).await?;
 
-        Ok(())
-    })
-    .await?
+    // Flush the remaining buffer to disk
+    writer.flush().await?;
+
+    // Atomically rename the file
+    fs::rename(&path_tmp, &path).await?;
+
+    Ok(())
 }
