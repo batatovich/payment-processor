@@ -24,7 +24,7 @@ pub fn run() -> Result<Cache, AppError> {
     let current_nonce = validate_nonce_sequence(balance_files.keys().copied().collect())?;
 
     let clients_map = hydrate_clients(&clients_path)?;
-    println!("✅ [BOOTSTRAP SUCCESS]");
+    println!("Bootstrap successful");
     Ok(Cache::new(clients_map, current_nonce as i32))
 }
 
@@ -37,7 +37,7 @@ fn init_directory(base_path: &Path, clients_path: &Path) -> Result<(), AppError>
         fs::write(clients_path, "").map_err(|e| {
             AppError::Bootstrap(format!("Failed to initialize {FILE_CLIENTS_METADATA}: {e}"))
         })?;
-        println!("✅ [DATA DIRECTORY INITIALIZED]");
+        println!("Data directory initialized");
     }
     Ok(())
 }
@@ -59,9 +59,7 @@ fn scan_balance_files(path: &Path) -> Result<HashMap<u32, PathBuf>, AppError> {
         let extension = p.extension().and_then(|s| s.to_str()).unwrap_or("");
 
         if extension.eq_ignore_ascii_case("tmp") {
-            return Err(AppError::Bootstrap(
-                "❌ [CRITICAL ERROR] Found orphan .tmp file.".to_string(),
-            ));
+            return Err(AppError::Bootstrap("Found orphan .tmp file.".to_string()));
         }
 
         if !extension.eq_ignore_ascii_case("dat") {
@@ -72,7 +70,7 @@ fn scan_balance_files(path: &Path) -> Result<HashMap<u32, PathBuf>, AppError> {
             && balance_files.insert(nonce, p).is_some()
         {
             return Err(AppError::Bootstrap(format!(
-                "❌ [CRITICAL ERROR] Duplicate balance file nonce {nonce}."
+                "Duplicate balance file nonce {nonce}."
             )));
         }
     }
@@ -89,7 +87,7 @@ fn validate_nonce_sequence(mut nonces: Vec<u32>) -> Result<u32, AppError> {
         let expected = (index + 1) as u32;
         if nonce != expected {
             return Err(AppError::Bootstrap(format!(
-                "❌ [CRITICAL ERROR] Broken balance file sequence: expected nonce {expected}, found {nonce}."
+                "Broken balance file sequence: expected nonce {expected}, found {nonce}."
             )));
         }
     }
