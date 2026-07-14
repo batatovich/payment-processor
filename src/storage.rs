@@ -21,7 +21,7 @@ pub async fn save_client_to_storage(client: &Client) -> Result<(), AppError> {
     let file_path = Path::new(DATA_DIR).join(FILE_CLIENTS_METADATA);
 
     // Offload the blocking write onto a dedicated thread.
-    task::spawn_blocking(move || {
+    task::spawn_blocking(move || -> Result<(), AppError> {
         // Open file in append mode
         let mut file = fs::OpenOptions::new()
             .write(true)

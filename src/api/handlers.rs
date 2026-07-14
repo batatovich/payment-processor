@@ -66,6 +66,37 @@ pub async fn new_client(
     Ok(HttpResponse::Ok().json(new_client.client_id.to_string()))
 }
 
+#[post("/store_balances")]
+pub async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder, AppError> {
+    // Lock the store guard.
+    // If we receive many requests to store_balances at the same time, we will effectively be making a queue here,
+    // waiting for earlier calls to finish writing to storage and udpating dirty clients cache.
+    // The lock is released when the function returns,
+    // and only there can another task try to store balances again.
+    let _store_guard = cache.store_lock.lock().await;
+
+    // Snapshot which clients have balance changes to save
+    let dirty_clients = cache.get_dirty_clients().await?;
+
+    // Early return if no news
+    if dirty_clients.is_empty() {
+        return Ok(HttpResponse::Ok().finish());
+    }
+    let balance_changes = cache.collect_batch_deltas(&dirty_clients).await?;
+
+    let nonce = cache.get_nonce() + 1;
+
+    // Write to file.
+    // If anything here fails, the cache was never modified and we could retry the operation if needed.
+    storage::save_balance_changes(nonce, &balance_changes).await?;
+
+    cache.apply_persisted_deltas(&balance_changes).await?;
+
+    cache.increment_nonce();
+
+    Ok(HttpResponse::Ok().finish())
+}
+
 #[post("/new_credit_transaction")]
 pub async fn new_credit_transaction(
     req_body: web::Json<NewCreditTransactionBody>,
@@ -96,37 +127,6 @@ pub async fn new_debit_transaction(
         .await?;
 
     Ok(HttpResponse::Ok().json(new_balance))
-}
-
-#[post("/store_balances")]
-pub async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder, AppError> {
-    // Lock the store guard.
-    // If we receive many requests to store_balances at the same time, we will effectively be making a queue here,
-    // waiting for earlier calls to finish writing to storage and udpating dirty clients cache.
-    // The lock is released when the function returns,
-    // and only there can another task try to store balances again.
-    let _store_guard = cache.store_lock.lock().await;
-
-    // Snapshot which clients have balance changes to save
-    let dirty_clients = cache.get_dirty_clients().await?;
-
-    // Early return if no news
-    if dirty_clients.is_empty() {
-        return Ok(HttpResponse::Ok().finish());
-    }
-    let balance_changes = cache.collect_batch_deltas(&dirty_clients).await?;
-
-    let nonce = cache.get_nonce() + 1;
-
-    // Write to file.
-    // If anything here fails, the cache was never modified and we could retry the operation if needed.
-    storage::save_balance_changes(nonce, &balance_changes).await?;
-
-    cache.apply_persisted_deltas(&balance_changes).await?;
-
-    cache.increment_nonce();
-
-    Ok(HttpResponse::Ok().finish())
 }
 
 #[get("/get_balance")]
