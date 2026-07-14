@@ -28,19 +28,17 @@ pub async fn save_client_to_storage(client: &Client) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Writes balance changes to storage.
+/// Writes the balances of dirty clients to storage.
 ///
 /// Filename format: {date}_{nonce}.dat
-/// Data format: {client_id} {balance_change}
+/// Data format: {client_id} {balance}
 ///
-/// The data is written to a .tmp file and then renamed to the final filename to ensure all data is written.
-pub async fn save_balance_changes(
-    nonce: i32,
-    balance_changes: &Vec<(Uuid, Decimal)>,
-) -> Result<(), AppError> {
+/// Balances may be negative. The data is written to a .tmp file and then renamed
+/// to the final filename to ensure all data is written.
+pub async fn save_balances(nonce: i32, balances: &[(Uuid, Decimal)]) -> Result<(), AppError> {
     let mut buf = String::new();
-    for (client_id, delta) in balance_changes {
-        let _ = writeln!(buf, "{} {}", client_id, delta);
+    for (client_id, balance) in balances {
+        let _ = writeln!(buf, "{} {}", client_id, balance);
     }
 
     let now = chrono::Utc::now();

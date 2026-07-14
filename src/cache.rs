@@ -11,15 +11,10 @@ use crate::model::{Client, Document, TransactionDirection};
 /// Represents the in-memory state of a single client.
 pub struct ClientState {
     pub document: Document,
-    pub balances: Mutex<ClientBalances>,
-}
-/// Tracks the active balance and pending balance change of a client.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ClientBalances {
-    /// The permanently persisted, settled balance of the client.
-    pub settled_balance: Decimal,
-    /// The temporary, uncommitted change (delta) to be written to the next ledger file.
-    pub delta_balance: Decimal,
+    /// The client's running balance. Starts at zero on boot, accumulates credits
+    /// and debits (may go negative), and is flushed back to zero whenever it is
+    /// persisted by `store_balances`.
+    pub balance: Mutex<Decimal>,
 }
 
 pub type ClientsMap = HashMap<Uuid, ClientState>;
@@ -37,7 +32,7 @@ pub struct Cache {
     /// Prevents duplicate sign-up race conditions before they are persisted.
     pending_registrations: Mutex<HashSet<Document>>,
 
-    /// Client IDs that have memory-only balance updates (deltas) waiting to be flushed.
+    /// Client IDs whose balance has memory-only changes waiting to be flushed.
     dirty_client_ids: Mutex<HashSet<Uuid>>,
 
     /// Serializes writing operations to guarantee atomic updates and prevent races.
@@ -87,17 +82,14 @@ impl Cache {
             .remove(document_number);
     }
 
-    /// Inserts a newly registered client, seeding it with a zero balance and delta.
+    /// Inserts a newly registered client, seeding it with a zero balance.
     pub async fn insert_client(&self, client: &Client) {
         let mut clients = self.clients.write().await;
         clients.insert(
             client.client_id,
             ClientState {
                 document: client.details.document_number.clone(),
-                balances: Mutex::new(ClientBalances {
-                    settled_balance: Decimal::ZERO,
-                    delta_balance: Decimal::ZERO,
-                }),
+                balance: Mutex::new(Decimal::ZERO),
             },
         );
     }
@@ -105,8 +97,8 @@ impl Cache {
 
 // Balance operations
 impl Cache {
-    /// Applies a credit or debit to a client's in-memory delta and returns the resulting
-    /// balance. Debits that would overdraw the account are rejected, leaving it untouched.
+    /// Applies a credit or debit to a client's balance and returns the resulting
+    /// balance. Debits are always accepted and may drive the balance negative.
     pub async fn apply_balance_change(
         &self,
         client_id: Uuid,
@@ -118,78 +110,65 @@ impl Cache {
         let client_state = clients.get(&client_id).ok_or(AppError::ClientNotFound)?;
 
         let new_balance = {
-            let mut balances = client_state.balances.lock().await;
-            let current = balances.settled_balance + balances.delta_balance;
-
+            let mut balance = client_state.balance.lock().await;
             match direction {
-                TransactionDirection::Credit => {
-                    balances.delta_balance += amount;
-                    current + amount
-                }
-                TransactionDirection::Debit => {
-                    let projected = current - amount;
-                    if projected.is_sign_negative() {
-                        return Err(AppError::InsufficientFunds);
-                    }
-                    balances.delta_balance -= amount;
-                    projected
-                }
+                TransactionDirection::Credit => *balance += amount,
+                TransactionDirection::Debit => *balance -= amount,
             }
+            *balance
         };
 
         self.mark_dirty(client_id).await;
         Ok(new_balance)
     }
 
-    /// Returns the client's document number and current balance (settled + pending delta).
+    /// Returns the client's document number and current balance.
     pub async fn get_client_state(&self, client_id: Uuid) -> Result<(Document, Decimal), AppError> {
         let clients = self.clients.read().await;
         let client_state = clients.get(&client_id).ok_or(AppError::ClientNotFound)?;
 
-        let balances = client_state.balances.lock().await;
-        Ok((
-            client_state.document.clone(),
-            balances.settled_balance + balances.delta_balance,
-        ))
+        let balance = *client_state.balance.lock().await;
+        Ok((client_state.document.clone(), balance))
     }
 }
 
 // Persistence / flush
 impl Cache {
-    /// Snapshots the pending delta of every dirty client, producing the batch to be
-    /// written to the next ledger file.
-    pub async fn snapshot_dirty_deltas(&self) -> Vec<(Uuid, Decimal)> {
+    /// Snapshots the current balance of every dirty client, producing the batch to
+    /// be written to the next balance file.
+    pub async fn snapshot_dirty_balances(&self) -> Vec<(Uuid, Decimal)> {
         // Copy the dirty id set and release its lock before touching client balances.
         let dirty_ids = self.dirty_client_ids.lock().await.clone();
 
         let clients = self.clients.read().await;
-        let mut deltas = Vec::with_capacity(dirty_ids.len());
+        let mut balances = Vec::with_capacity(dirty_ids.len());
         for client_id in dirty_ids {
             if let Some(client_state) = clients.get(&client_id) {
-                let delta = client_state.balances.lock().await.delta_balance;
-                deltas.push((client_id, delta));
+                let balance = *client_state.balance.lock().await;
+                balances.push((client_id, balance));
             }
         }
-        deltas
+        balances
     }
 
-    /// Folds persisted deltas into each client's settled balance, clearing a client
-    /// from the dirty set once its delta is fully settled.
-    pub async fn apply_persisted_deltas(&self, persisted_deltas: &[(Uuid, Decimal)]) {
+    /// Resets each persisted balance back to zero, clearing the client from the
+    /// dirty set. Subtracting the persisted amount (rather than hard-setting to
+    /// zero) preserves any transaction that landed after the snapshot was taken;
+    /// such a client stays dirty for the next flush.
+    pub async fn reset_persisted_balances(&self, persisted_balances: &[(Uuid, Decimal)]) {
         let clients = self.clients.read().await;
         let mut dirty_ids = self.dirty_client_ids.lock().await;
 
-        for (client_id, delta) in persisted_deltas {
+        for (client_id, persisted) in persisted_balances {
             if let Some(client_state) = clients.get(client_id) {
-                // Isolate the balances lock so it releases before the next iteration.
-                let fully_settled = {
-                    let mut balances = client_state.balances.lock().await;
-                    balances.settled_balance += delta;
-                    balances.delta_balance -= delta;
-                    balances.delta_balance.is_zero()
+                // Isolate the balance lock so it releases before the next iteration.
+                let fully_flushed = {
+                    let mut balance = client_state.balance.lock().await;
+                    *balance -= persisted;
+                    balance.is_zero()
                 };
 
-                if fully_settled {
+                if fully_flushed {
                     dirty_ids.remove(client_id);
                 }
             }

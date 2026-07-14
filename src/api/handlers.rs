@@ -9,6 +9,7 @@ use crate::error::AppError;
 use crate::model::{Client, TransactionDirection};
 use crate::storage;
 
+/// Lists the available API endpoints.
 #[get("/")]
 pub async fn index() -> impl Responder {
     let endpoints = [
@@ -22,12 +23,8 @@ pub async fn index() -> impl Responder {
     HttpResponse::Ok().json(&endpoints)
 }
 
-/// Add a new client to the system. If the document is already in use, an error is returned.
-/// If the document is not in use, it is added to the in-flight cache.
-/// The client is then written to storage and added to the clients cache.
-/// If the write to storage fails, the client is removed from the in-flight cache and an error is returned.
-/// If the write to storage succeeds, the client is added to the clients cache.
-/// If the write to storage succeeds, the client is added to the clients cache.
+/// Registers a new client: rejects duplicate documents, persists the client to
+/// storage, and only then adds it to the in-memory cache.
 #[post("/new_client")]
 pub async fn new_client(
     req_body: web::Json<NewClientBody>,
@@ -66,38 +63,38 @@ pub async fn new_client(
     Ok(HttpResponse::Ok().json(new_client.client_id.to_string()))
 }
 
+/// Flushes the balances of all dirty clients to a storage file, then resets those
+/// balances to zero in memory.
 #[post("/store_balances")]
 pub async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder, AppError> {
     // Lock the store guard.
-    // If we receive many requests to store_balances at the same time, we will effectively be making a queue here,
-    // waiting for earlier calls to finish writing to storage and udpating dirty clients cache.
     // The lock is released when the function returns,
     // and only there can another task try to store balances again.
     let _store_guard = cache.persistence_lock.lock().await;
 
-    // Snapshot the pending balance changes to persist.
-    let balance_changes = cache.snapshot_dirty_deltas().await;
+    // Snapshot the balances of dirty clients to persist.
+    let balances = cache.snapshot_dirty_balances().await;
 
     // Early return if there's nothing new to write.
-    if balance_changes.is_empty() {
+    if balances.is_empty() {
         return Ok(HttpResponse::Ok().finish());
     }
 
     let nonce = cache.get_nonce() + 1;
 
-    // Append the ledger file recording this batch of deltas. This is the sole
-    // durability point for balance changes between checkpoints: bootstrap replays
-    // these ledgers on top of clients.dat, so no full metadata rewrite is needed here.
+    // Write the file recording this batch of balances. Once persisted, the flushed
+    // balances are reset to zero in memory.
     // If this fails, the cache was never modified and the operation can be retried.
-    storage::save_balance_changes(nonce, &balance_changes).await?;
+    storage::save_balances(nonce, &balances).await?;
 
-    cache.apply_persisted_deltas(&balance_changes).await;
+    cache.reset_persisted_balances(&balances).await;
 
     cache.increment_nonce();
 
     Ok(HttpResponse::Ok().finish())
 }
 
+/// Credits a client's balance and returns the updated balance.
 #[post("/new_credit_transaction")]
 pub async fn new_credit_transaction(
     req_body: web::Json<NewCreditTransactionBody>,
@@ -114,6 +111,7 @@ pub async fn new_credit_transaction(
     Ok(HttpResponse::Ok().json(new_balance))
 }
 
+/// Debits a client's balance (may go negative) and returns the updated balance.
 #[post("/new_debit_transaction")]
 pub async fn new_debit_transaction(
     req_body: web::Json<NewDebitTransactionBody>,
@@ -130,6 +128,7 @@ pub async fn new_debit_transaction(
     Ok(HttpResponse::Ok().json(new_balance))
 }
 
+/// Returns a client's document number and current balance.
 #[get("/get_balance")]
 pub async fn get_balance(
     query: web::Query<GetBalanceQuery>,

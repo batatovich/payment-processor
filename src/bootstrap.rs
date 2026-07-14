@@ -1,4 +1,4 @@
-use crate::cache::{Cache, ClientBalances, ClientState, ClientsMap};
+use crate::cache::{Cache, ClientState, ClientsMap};
 use crate::constants::{DATA_DIR, FILE_CLIENTS_METADATA};
 use crate::error::AppError;
 use crate::model::Client;
@@ -11,11 +11,9 @@ use uuid::Uuid;
 
 /// Bootstrapping routine. Runs each time the server starts.
 ///
-/// Rebuilds balance state from scratch by replaying every delta file in
-/// order, then hydrates the in-memory client cache. No checkpointing —
-/// simple, at the cost of replaying the full delta history on every boot.
-///
-/// For a more sophisticated approach, we could use a checkpoint file to only replay the deltas since the last checkpoint.
+/// Client balances always start at zero on boot.
+/// The existing balance files are scanned only to recover the next nonce so new
+/// writes don't collide with prior ones.
 pub fn run() -> Result<Cache, AppError> {
     println!("Bootstrapping system state...");
     let path = Path::new(DATA_DIR);
@@ -23,14 +21,11 @@ pub fn run() -> Result<Cache, AppError> {
 
     init_directory(path, &clients_path)?;
 
-    let deltas = scan_delta_files(path)?;
-    let current_nonce = validate_nonce_sequence(deltas.keys().copied().collect())?;
+    let balance_files = scan_balance_files(path)?;
+    let current_nonce = validate_nonce_sequence(balance_files.keys().copied().collect())?;
     let metadata = hydrate_metadata(&clients_path)?;
 
-    let mut balances = HashMap::new();
-    replay_deltas(&mut balances, &deltas, &metadata)?;
-
-    let clients_map = build_clients_map(metadata, &balances);
+    let clients_map = build_clients_map(metadata);
     println!("✅ [BOOTSTRAP SUCCESS]");
     Ok(Cache::new(clients_map, current_nonce as i32))
 }
@@ -48,13 +43,13 @@ fn init_directory(base_path: &Path, clients_path: &Path) -> Result<(), AppError>
     Ok(())
 }
 
-/// Single-pass directory scan collecting delta files by nonce. Any orphan
+/// Single-pass directory scan collecting balance files by nonce. Any orphan
 /// `.tmp` file (an interrupted write) aborts boot.
-fn scan_delta_files(path: &Path) -> Result<HashMap<u32, PathBuf>, AppError> {
+fn scan_balance_files(path: &Path) -> Result<HashMap<u32, PathBuf>, AppError> {
     let entries = fs::read_dir(path)
         .map_err(|e| AppError::Bootstrap(format!("Failed to read data directory: {e}")))?;
 
-    let mut deltas = HashMap::new();
+    let mut balance_files = HashMap::new();
 
     for entry in entries.flatten() {
         let p = entry.path();
@@ -75,19 +70,19 @@ fn scan_delta_files(path: &Path) -> Result<HashMap<u32, PathBuf>, AppError> {
         }
 
         if let Some(nonce) = extract_nonce_from_filename(&p) {
-            if deltas.insert(nonce, p).is_some() {
+            if balance_files.insert(nonce, p).is_some() {
                 return Err(AppError::Bootstrap(format!(
-                    "❌ [CRITICAL ERROR] Duplicate delta nonce {nonce}."
+                    "❌ [CRITICAL ERROR] Duplicate balance file nonce {nonce}."
                 )));
             }
         }
     }
 
-    Ok(deltas)
+    Ok(balance_files)
 }
 
 /// Validates that nonces form an unbroken, non-duplicate `1..=N` sequence.
-/// Returns `N`, or `0` if there are no deltas yet.
+/// Returns `N`, or `0` if there are no balance files yet.
 fn validate_nonce_sequence(mut nonces: Vec<u32>) -> Result<u32, AppError> {
     nonces.sort_unstable();
 
@@ -104,7 +99,7 @@ fn validate_nonce_sequence(mut nonces: Vec<u32>) -> Result<u32, AppError> {
 }
 
 /// Reads the append-only client metadata ledger (name, document, etc).
-/// Does not carry balance — balance is sourced entirely from delta files.
+/// Does not carry balance — every client starts at a zero balance on boot.
 fn hydrate_metadata(clients_path: &Path) -> Result<HashMap<Uuid, Client>, AppError> {
     let content = fs::read_to_string(clients_path)
         .map_err(|e| AppError::Bootstrap(format!("Failed to read clients from storage: {e}")))?;
@@ -124,99 +119,24 @@ fn hydrate_metadata(clients_path: &Path) -> Result<HashMap<Uuid, Client>, AppErr
     Ok(metadata)
 }
 
-/// Replays every delta file, accumulating each client's balance from zero.
-/// Order doesn't matter here — deltas are summed, and `scan_delta_files` /
-/// `validate_nonce_sequence` already guarantee the set has no gaps or dupes.
-fn replay_deltas(
-    balances: &mut HashMap<Uuid, Decimal>,
-    deltas: &HashMap<u32, PathBuf>,
-    metadata: &HashMap<Uuid, Client>,
-) -> Result<(), AppError> {
-    for delta_path in deltas.values() {
-        let content = fs::read_to_string(delta_path).map_err(|e| {
-            AppError::Bootstrap(format!(
-                "Failed to read delta file {}: {e}",
-                delta_path.display()
-            ))
-        })?;
-
-        for (idx, line) in content.lines().map(str::trim).enumerate() {
-            if line.is_empty() {
-                continue;
-            }
-
-            let (client_id, delta) = parse_balance_line(line, delta_path, idx + 1)?;
-            if !metadata.contains_key(&client_id) {
-                return Err(AppError::Bootstrap(format!(
-                    "Delta file {}:{} references unregistered client {client_id}",
-                    delta_path.display(),
-                    idx + 1
-                )));
-            }
-            *balances.entry(client_id).or_insert(Decimal::ZERO) += delta;
-        }
-    }
-
-    Ok(())
-}
-
-/// Merges client metadata with replayed balances into the final in-memory cache map.
-fn build_clients_map(
-    metadata: HashMap<Uuid, Client>,
-    balances: &HashMap<Uuid, Decimal>,
-) -> ClientsMap {
+/// Builds the in-memory cache map from client metadata, seeding every client
+/// with a zero balance.
+fn build_clients_map(metadata: HashMap<Uuid, Client>) -> ClientsMap {
     metadata
         .into_iter()
         .map(|(id, meta)| {
-            let settled_balance = balances.get(&id).copied().unwrap_or(Decimal::ZERO);
             (
                 id,
                 ClientState {
                     document: meta.details.document_number,
-                    balances: Mutex::new(ClientBalances {
-                        settled_balance,
-                        delta_balance: Decimal::ZERO,
-                    }),
+                    balance: Mutex::new(Decimal::ZERO),
                 },
             )
         })
         .collect()
 }
 
-/// Parses a single `<uuid> <decimal>` ledger line.
-fn parse_balance_line(
-    line: &str,
-    source: &Path,
-    line_no: usize,
-) -> Result<(Uuid, Decimal), AppError> {
-    let (id_str, value_str) = line.split_once(' ').ok_or_else(|| {
-        AppError::Bootstrap(format!(
-            "Malformed entry at {}:{}",
-            source.display(),
-            line_no
-        ))
-    })?;
-
-    let client_id = Uuid::parse_str(id_str.trim()).map_err(|e| {
-        AppError::Bootstrap(format!(
-            "Invalid client ID at {}:{}: {e}",
-            source.display(),
-            line_no
-        ))
-    })?;
-
-    let value = Decimal::from_str_exact(value_str.trim()).map_err(|e| {
-        AppError::Bootstrap(format!(
-            "Invalid decimal value at {}:{}: {e}",
-            source.display(),
-            line_no
-        ))
-    })?;
-
-    Ok((client_id, value))
-}
-
-/// Extracts the nonce from a delta filename matching `ddmmyyyy_<nonce>.dat`.
+/// Extracts the nonce from a balance filename matching `ddmmyyyy_<nonce>.dat`.
 fn extract_nonce_from_filename(file_path: &Path) -> Option<u32> {
     let stem = file_path.file_stem()?.to_str()?;
     let (date_str, counter_str) = stem.split_once('_')?;
