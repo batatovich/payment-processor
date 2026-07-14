@@ -1,4 +1,4 @@
-use crate::cache::{Cache, ClientCache, ClientsMap};
+use crate::cache::{Cache, ClientState, ClientsMap};
 use crate::constants::{DATA_DIR, FILE_CLIENTS_METADATA};
 use crate::error::AppError;
 use crate::model::Client;
@@ -28,11 +28,12 @@ pub fn run() -> Result<Cache, AppError> {
     Ok(Cache::new(clients_map, current_nonce as i32))
 }
 
-/// Creates the data directory and an empty clients ledger on first run.
+/// Ensures the data directory and an empty clients file exist.
 fn init_directory(base_path: &Path, clients_path: &Path) -> Result<(), AppError> {
-    if !base_path.exists() {
-        fs::create_dir_all(base_path)
-            .map_err(|e| AppError::Bootstrap(format!("Failed to create data directory: {e}")))?;
+    fs::create_dir_all(base_path)
+        .map_err(|e| AppError::Bootstrap(format!("Failed to create data directory: {e}")))?;
+
+    if !clients_path.exists() {
         fs::write(clients_path, "").map_err(|e| {
             AppError::Bootstrap(format!("Failed to initialize {FILE_CLIENTS_METADATA}: {e}"))
         })?;
@@ -67,12 +68,12 @@ fn scan_balance_files(path: &Path) -> Result<HashMap<u32, PathBuf>, AppError> {
             continue;
         }
 
-        if let Some(nonce) = extract_nonce_from_filename(&p) {
-            if balance_files.insert(nonce, p).is_some() {
-                return Err(AppError::Bootstrap(format!(
-                    "❌ [CRITICAL ERROR] Duplicate balance file nonce {nonce}."
-                )));
-            }
+        if let Some(nonce) = extract_nonce_from_filename(&p)
+            && balance_files.insert(nonce, p).is_some()
+        {
+            return Err(AppError::Bootstrap(format!(
+                "❌ [CRITICAL ERROR] Duplicate balance file nonce {nonce}."
+            )));
         }
     }
 
@@ -88,7 +89,7 @@ fn validate_nonce_sequence(mut nonces: Vec<u32>) -> Result<u32, AppError> {
         let expected = (index + 1) as u32;
         if nonce != expected {
             return Err(AppError::Bootstrap(format!(
-                "❌ [CRITICAL ERROR] Broken or duplicate sequence chain at index {expected}."
+                "❌ [CRITICAL ERROR] Broken balance file sequence: expected nonce {expected}, found {nonce}."
             )));
         }
     }
@@ -115,8 +116,8 @@ fn hydrate_clients(clients_path: &Path) -> Result<ClientsMap, AppError> {
 
         clients.insert(
             record.client_id,
-            ClientCache {
-                client_details: record.details,
+            ClientState {
+                details: record.details,
                 balance: Mutex::new(Decimal::ZERO),
             },
         );

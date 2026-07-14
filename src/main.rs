@@ -11,20 +11,16 @@ use actix_web::{App, HttpServer, web};
 use crate::api::handlers::{
     get_balance, index, new_client, new_credit_transaction, new_debit_transaction, store_balances,
 };
+use crate::constants::{SERVER_HOST, SERVER_PORT};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    println!("Starting server");
-
     let cache = match bootstrap::run() {
         Ok(cache) => web::Data::new(cache),
-        Err(e) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ));
-        }
+        Err(e) => return Err(std::io::Error::other(e.to_string())),
     };
+
+    println!("Starting server on {SERVER_HOST}:{SERVER_PORT}");
 
     HttpServer::new(move || {
         App::new()
@@ -36,7 +32,7 @@ async fn main() -> std::io::Result<()> {
             .service(store_balances)
             .service(get_balance)
     })
-    .bind(("127.0.0.1", 8080))?
+    .bind((SERVER_HOST, SERVER_PORT))?
     .run()
     .await
 }

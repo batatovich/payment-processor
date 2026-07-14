@@ -1,3 +1,6 @@
+use crate::api::dto::NewClientBody as ClientDetails;
+use crate::error::AppError;
+use crate::model::{Client, Document, TransactionDirection};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicI32;
@@ -5,22 +8,18 @@ use std::sync::atomic::Ordering::Relaxed;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
-use crate::api::dto::NewClientBody as ClientDetails;
-use crate::error::AppError;
-use crate::model::{Client, Document, TransactionDirection};
-
-/// Represents the in-memory state of a single client.
-pub struct ClientCache {
-    pub client_details: ClientDetails,
+/// In-memory state of a single registered client.
+pub struct ClientState {
+    pub details: ClientDetails,
     /// The client's running balance. Starts at zero on boot, accumulates credits
     /// and debits (may go negative), and is flushed back to zero whenever it is
     /// persisted by `store_balances`.
     pub balance: Mutex<Decimal>,
 }
 
-pub type ClientsMap = HashMap<Uuid, ClientCache>;
+pub type ClientsMap = HashMap<Uuid, ClientState>;
 
-// Shared App State
+/// Shared application state, accessed concurrently by every request handler.
 pub struct Cache {
     /// The latest nonce successfully committed to storage.
     latest_nonce: AtomicI32,
@@ -28,6 +27,10 @@ pub struct Cache {
     /// In-memory registry of all clients.
     /// Read-lock for balance queries and existence checks; write-lock only to register new clients.
     clients: RwLock<ClientsMap>,
+
+    /// Document numbers of all registered clients, kept in sync with `clients`.
+    /// Enables O(1) duplicate detection without scanning the whole registry.
+    registered_documents: RwLock<HashSet<Document>>,
 
     /// Unique document numbers currently undergoing registration.
     /// Prevents duplicate sign-up race conditions before they are persisted.
@@ -43,8 +46,14 @@ pub struct Cache {
 impl Cache {
     /// Builds a cache from a hydrated clients map and the latest ledger nonce.
     pub fn new(clients: ClientsMap, nonce: i32) -> Self {
+        let registered_documents = clients
+            .values()
+            .map(|client| client.details.document_number.clone())
+            .collect();
+
         Cache {
             clients: RwLock::new(clients),
+            registered_documents: RwLock::new(registered_documents),
             latest_nonce: AtomicI32::new(nonce),
             pending_registrations: Mutex::new(HashSet::new()),
             dirty_client_ids: Mutex::new(HashSet::new()),
@@ -57,10 +66,10 @@ impl Cache {
 impl Cache {
     /// Returns whether a document number already belongs to a registered client.
     pub async fn is_document_in_use(&self, document_number: &Document) -> bool {
-        let clients = self.clients.read().await;
-        clients
-            .values()
-            .any(|client_cache| client_cache.client_details.document_number == *document_number)
+        self.registered_documents
+            .read()
+            .await
+            .contains(document_number)
     }
 
     /// Reserves a document number for an in-progress registration, rejecting a
@@ -83,13 +92,17 @@ impl Cache {
             .remove(document_number);
     }
 
-    /// Inserts a newly registered client, seeding it with a zero balance.
+    /// Inserts a newly registered client, seeding it with a zero balance and
+    /// recording its document number in the duplicate-detection index.
     pub async fn insert_client(&self, client: &Client) {
         let mut clients = self.clients.write().await;
+        let mut documents = self.registered_documents.write().await;
+
+        documents.insert(client.details.document_number.clone());
         clients.insert(
             client.client_id,
-            ClientCache {
-                client_details: client.details.clone(),
+            ClientState {
+                details: client.details.clone(),
                 balance: Mutex::new(Decimal::ZERO),
             },
         );
@@ -129,7 +142,7 @@ impl Cache {
         let client_state = clients.get(&client_id).ok_or(AppError::ClientNotFound)?;
 
         let balance = *client_state.balance.lock().await;
-        Ok((client_state.client_details.document_number.clone(), balance))
+        Ok((client_state.details.document_number.clone(), balance))
     }
 }
 

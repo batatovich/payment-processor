@@ -24,10 +24,10 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(body: NewClientBody) -> Self {
+    pub fn new(details: NewClientBody) -> Self {
         Self {
             client_id: Uuid::now_v7(),
-            details: body.clone(),
+            details,
         }
     }
 }

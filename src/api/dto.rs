@@ -12,24 +12,24 @@ pub struct NewClientBody {
     pub country: Country,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 pub struct NewCreditTransactionBody {
     pub client_id: Uuid,
     pub credit_amount: Decimal,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 pub struct NewDebitTransactionBody {
     pub client_id: Uuid,
     pub debit_amount: Decimal,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 pub struct GetBalanceQuery {
     pub client_id: Uuid,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Serialize)]
 pub struct GetBalanceResponse {
     pub client_id: Uuid,
     pub document_number: Document,

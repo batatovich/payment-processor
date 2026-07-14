@@ -20,7 +20,7 @@ pub async fn index() -> impl Responder {
         ("GET /get_balance", "Retrieve a client's current balance"),
     ];
 
-    HttpResponse::Ok().json(&endpoints)
+    HttpResponse::Ok().json(endpoints)
 }
 
 /// Registers a new client: rejects duplicate documents, persists the client to
@@ -31,36 +31,29 @@ pub async fn new_client(
     cache: web::Data<Cache>,
 ) -> Result<impl Responder, AppError> {
     let body = req_body.into_inner();
-    let document_number = &body.document_number.clone();
+    let document_number = body.document_number.clone();
 
-    // Check if document is already in use
-    if cache.is_document_in_use(document_number).await {
+    if cache.is_document_in_use(&document_number).await {
         return Err(AppError::DocumentInUse);
     }
 
-    // Reserve the document to mark that this client is being created and has yet to be persisted to storage.
-    // The cache will only reflect the new client once its safely saved to storage.
-    cache.reserve_document(document_number).await?;
+    // Reserve the document so a concurrent sign-up on the same number is rejected
+    // while this one is still being persisted (it isn't in the cache yet).
+    cache.reserve_document(&document_number).await?;
 
-    // New Client
-    let new_client = Client::new(body);
+    let client = Client::new(body);
 
-    // Write the new client to storage
-    // If this returns an error, the reserved document is released
-    // and the client is never added to the clients cache
-    if let Err(e) = storage::save_client_to_storage(&new_client).await {
-        cache.release_document(document_number).await;
+    // Persist first, then publish to the cache. On write failure the reservation
+    // is released and the client is never made visible, so the call can be retried.
+    if let Err(e) = storage::save_client_to_storage(&client).await {
+        cache.release_document(&document_number).await;
         return Err(e);
     }
 
-    // Add the new client to the clients cache
-    cache.insert_client(&new_client).await;
+    cache.insert_client(&client).await;
+    cache.release_document(&document_number).await;
 
-    // Release the reserved document now that registration is complete
-    cache.release_document(document_number).await;
-
-    // Return the client id
-    Ok(HttpResponse::Ok().json(new_client.client_id.to_string()))
+    Ok(HttpResponse::Ok().json(client.client_id.to_string()))
 }
 
 /// Flushes the balances of all dirty clients to a storage file, then resets those
