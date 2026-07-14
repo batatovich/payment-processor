@@ -2,63 +2,74 @@ use crate::constants::{DATA_DIR, FILE_CLIENTS_METADATA};
 use crate::error::AppError;
 use crate::model::Client;
 use rust_decimal::Decimal;
+use std::fmt::Write;
+use std::fs;
+use std::io::{BufWriter, Write as IoWrite};
 use std::path::Path;
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::task;
 use uuid::Uuid;
 
-/// Appends a single client record to the clients storage asynchronously
+/// Appends a single client record to storage.
+///
+/// Serialization runs on the async task; the blocking file I/O is offloaded to a
+/// dedicated blocking thread, so callers can simply `.await` this safely.
 pub async fn save_client_to_storage(client: &Client) -> Result<(), AppError> {
-    // Serialize the `Client` struct
+    // Serialize the `Client` struct (cheap, in-memory work)
     let mut serialized = serde_json::to_string(client)?;
-
     serialized.push('\n');
 
-    // Resolve target path securely
     let file_path = Path::new(DATA_DIR).join(FILE_CLIENTS_METADATA);
 
-    // Open the file in append mode
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .append(true)
-        .open(file_path)
-        .await?;
+    // Offload the blocking write onto a dedicated thread.
+    task::spawn_blocking(move || {
+        // Open file in append mode
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .append(true)
+            .open(file_path)?;
 
-    // Write the client to the file
-    file.write_all(serialized.as_bytes()).await?;
+        file.write_all(serialized.as_bytes())?;
+        file.flush()?;
 
-    file.flush().await?;
-
-    Ok(())
+        Ok(())
+    })
+    .await?
 }
 
+/// Writes balance changes atomically using a temporary file.
 pub async fn save_balance_changes(
     nonce: i32,
-    deltas_to_write: &Vec<(Uuid, Decimal)>,
+    balance_changes: &Vec<(Uuid, Decimal)>,
 ) -> Result<(), AppError> {
-    // Write to file.
-    // If anything here fails, the cache was never modified and we could retry the operation if needed.
-    let now = chrono::Utc::now();
-    let file_name_final = format!("{}_{}.dat", now.format("%d%m%Y"), nonce);
-    let file_name_tmp = format!("{file_name_final}.tmp");
-    let data_dir = Path::new(DATA_DIR);
-    let path_tmp = data_dir.join(&file_name_tmp);
-    let path_final = data_dir.join(&file_name_final);
-
-    // First dump everything to a .tmp file. Once this succeeds, we strip the .tmp.
-    // This way we mimic atomicity: either all the deltas are properly persisted, or we are sure to get an error.
-    // We use the async tokio::fs module to avoid blocking the thread will we wait to write.
-    let mut file_tmp = fs::File::create(&path_tmp).await?;
-    for (client_id, delta) in deltas_to_write {
-        let line = format!("{} {}\n", client_id, delta);
-        file_tmp.write_all(line.as_bytes()).await?
+    // Build the full payload up front
+    let mut buf = String::new();
+    for (client_id, delta) in balance_changes {
+        let _ = writeln!(buf, "{} {}", client_id, delta);
     }
 
-    // Flush buffers
-    file_tmp.flush().await?;
+    let now = chrono::Utc::now();
+    let file_name = format!("{}_{}.dat", now.format("%d%m%Y"), nonce);
+    let file_name_tmp = format!("{file_name}.tmp");
 
-    // Rename
-    fs::rename(&path_tmp, &path_final).await?;
+    let data_dir = Path::new(DATA_DIR);
+    let path: std::path::PathBuf = data_dir.join(&file_name);
+    let path_tmp = data_dir.join(&file_name_tmp);
 
-    Ok(())
+    // Offload the write to a dedicated blocking thread.
+    task::spawn_blocking(move || -> Result<(), AppError> {
+        let file_tmp = fs::File::create(&path_tmp)?;
+
+        // Use BufWriter to keep disk writes batch-buffered in memory
+        let mut writer = BufWriter::new(file_tmp);
+        writer.write_all(buf.as_bytes())?;
+
+        // Flush the remaining buffer to disk
+        writer.flush()?;
+
+        // Atomically rename the file
+        fs::rename(&path_tmp, &path)?;
+
+        Ok(())
+    })
+    .await?
 }

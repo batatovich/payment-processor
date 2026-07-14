@@ -18,15 +18,15 @@ pub struct Cache {
     // The key is the cliend_id and the value is a tuple: (client document, mutex(net balance, delta))
     // The outer async rwlock allows us to aquire a read lock when checking for client existence or quering client balance.
     // We only acquire the write lock if we need to insert a new client
-    pub clients: RwLock<ClientsMap>,
+    clients: RwLock<ClientsMap>,
     // Latest nonce
-    pub nonce: AtomicI32,
+    nonce: AtomicI32,
     // In-flight clients: new clients being processed and waiting for storage and cache sync up
-    pub in_flight: Mutex<HashSet<Document>>,
+    in_flight: Mutex<HashSet<Document>>,
     // Keeps track of clients with balance changes in memory
-    pub dirty_clients: Mutex<HashSet<Uuid>>,
+    dirty_clients: Mutex<HashSet<Uuid>>,
     // Lock used to prevent data races when writing to storage
-    pub store_lock: tokio::sync::Mutex<()>,
+    pub store_lock: Mutex<()>,
 }
 
 impl Cache {
@@ -40,7 +40,9 @@ impl Cache {
             store_lock: tokio::sync::Mutex::new(()),
         }
     }
+}
 
+impl Cache {
     /// Inserts a new client into the cache, initializing its balance with a zero delta.
     pub async fn insert_client(&self, client: &Client) {
         let mut clients = self.clients.write().await;
@@ -232,8 +234,15 @@ impl Cache {
 
         Ok(deltas_to_write)
     }
+}
 
+// Nonce operations
+impl Cache {
     pub fn increment_nonce(&self) {
         self.nonce.fetch_add(1, Relaxed);
+    }
+
+    pub fn get_nonce(&self) -> i32 {
+        self.nonce.load(Relaxed)
     }
 }

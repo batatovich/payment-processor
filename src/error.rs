@@ -1,6 +1,7 @@
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 use serde_json::json;
 use thiserror::Error;
+use tokio::task::JoinError;
 
 /// Central application error type.
 #[derive(Debug, Error)]
@@ -23,12 +24,12 @@ pub enum AppError {
     #[error("Serialization failure: {0}")]
     Serde(#[from] serde_json::Error),
 
-    /// Startup-time failures (missing control files, corrupted storage, nonce
-    /// mismatches, etc.)
+    /// Startup-time failures
     #[error("Bootstrap failure: {0}")]
     Bootstrap(String),
 }
 
+// Implement the ResponseError trait to convert the AppError into an Actix error
 impl ResponseError for AppError {
     fn status_code(&self) -> StatusCode {
         match self {
@@ -45,5 +46,11 @@ impl ResponseError for AppError {
         HttpResponse::build(self.status_code()).json(json!({
             "error": self.to_string(),
         }))
+    }
+}
+
+impl From<JoinError> for AppError {
+    fn from(error: JoinError) -> Self {
+        AppError::Io(error.into())
     }
 }

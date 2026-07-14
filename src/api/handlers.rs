@@ -1,13 +1,12 @@
 use actix_web::{HttpResponse, Responder, get, post, web};
-use std::sync::atomic::Ordering::Relaxed;
 
 use crate::api::dto::{
     GetBalanceQuery, GetBalanceResponse, NewClientBody, NewCreditTransactionBody,
     NewDebitTransactionBody,
 };
+use crate::cache::Cache;
 use crate::error::AppError;
 use crate::model::{Client, TransactionDirection};
-use crate::cache::Cache;
 use crate::storage;
 
 #[get("/")]
@@ -23,6 +22,12 @@ pub async fn index() -> impl Responder {
     HttpResponse::Ok().json(&endpoints)
 }
 
+/// Add a new client to the system. If the document is already in use, an error is returned.
+/// If the document is not in use, it is added to the in-flight cache.
+/// The client is then written to storage and added to the clients cache.
+/// If the write to storage fails, the client is removed from the in-flight cache and an error is returned.
+/// If the write to storage succeeds, the client is added to the clients cache.
+/// If the write to storage succeeds, the client is added to the clients cache.
 #[post("/new_client")]
 pub async fn new_client(
     req_body: web::Json<NewClientBody>,
@@ -37,7 +42,7 @@ pub async fn new_client(
     }
 
     // Set document in-flight to mark that this client is being created and has yet to be persisted to storage.
-    // The clients cache will only reflect the new client once its safely saved to storage.
+    // The cache will only reflect the new client once its safely saved to storage.
     cache.set_document_in_flight(document_number).await?;
 
     // New Client
@@ -99,7 +104,7 @@ pub async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder, A
     // If we receive many requests to store_balances at the same time, we will effectively be making a queue here,
     // waiting for earlier calls to finish writing to storage and udpating dirty clients cache.
     // The lock is released when the function returns,
-    // and only there can another thread/task try to store balances again.
+    // and only there can another task try to store balances again.
     let _store_guard = cache.store_lock.lock().await;
 
     // Snapshot which clients have balance changes to save
@@ -109,15 +114,15 @@ pub async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder, A
     if dirty_clients.is_empty() {
         return Ok(HttpResponse::Ok().finish());
     }
-    let deltas_to_write = cache.collect_batch_deltas(&dirty_clients).await?;
+    let balance_changes = cache.collect_batch_deltas(&dirty_clients).await?;
 
-    let nonce = cache.nonce.load(Relaxed) + 1;
+    let nonce = cache.get_nonce() + 1;
 
     // Write to file.
     // If anything here fails, the cache was never modified and we could retry the operation if needed.
-    storage::save_balance_changes(nonce, &deltas_to_write).await?;
+    storage::save_balance_changes(nonce, &balance_changes).await?;
 
-    cache.apply_persisted_deltas(&deltas_to_write).await?;
+    cache.apply_persisted_deltas(&balance_changes).await?;
 
     cache.increment_nonce();
 
