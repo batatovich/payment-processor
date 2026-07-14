@@ -8,9 +8,8 @@ use tokio::fs;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use uuid::Uuid;
 
-/// Appends a single client record to storage.
+/// Appends a client to the clients metadata file.
 pub async fn save_client_to_storage(client: &Client) -> Result<(), AppError> {
-    // Serialize the `Client` struct (cheap, in-memory work)
     let mut serialized = serde_json::to_string(client)?;
     serialized.push('\n');
 

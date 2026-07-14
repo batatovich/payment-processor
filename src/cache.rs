@@ -87,7 +87,7 @@ impl Cache {
             .remove(document_number);
     }
 
-    /// Inserts a newly registered client, seeding it with its settled balance and a zero delta.
+    /// Inserts a newly registered client, seeding it with a zero balance and delta.
     pub async fn insert_client(&self, client: &Client) {
         let mut clients = self.clients.write().await;
         clients.insert(
@@ -95,7 +95,7 @@ impl Cache {
             ClientState {
                 document: client.details.document_number.clone(),
                 balances: Mutex::new(ClientBalances {
-                    settled_balance: client.balance,
+                    settled_balance: dec!(0),
                     delta_balance: dec!(0),
                 }),
             },

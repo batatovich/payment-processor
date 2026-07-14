@@ -1,5 +1,4 @@
 use crate::api::dto::NewClientBody;
-use rust_decimal::{Decimal, dec};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -22,7 +21,6 @@ pub enum Country {
 pub struct Client {
     pub client_id: Uuid,
     pub details: NewClientBody,
-    pub balance: Decimal,
 }
 
 impl Client {
@@ -30,7 +28,6 @@ impl Client {
         Self {
             client_id: Uuid::now_v7(),
             details: body.clone(),
-            balance: dec!(0),
         }
     }
 }
