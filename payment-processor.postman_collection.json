@@ -1,0 +1,296 @@
+{
+	"info": {
+		"_postman_id": "2196574b-c407-479a-9216-50ae36f6621e",
+		"name": "payment-processor",
+		"description": "This collection is dedicated to testing a payment processor service corresponding to the Prex challenge",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "27837342",
+		"_collection_link": "https://monobloc-1515-s-team.postman.co/workspace/batas-workspace~8213c1f5-a1a3-47ff-8ec8-074fb104b88c/collection/27837342-2196574b-c407-479a-9216-50ae36f6621e?action=share&source=collection_link&creator=27837342"
+	},
+	"item": [
+		{
+			"name": "happy path",
+			"item": [
+				{
+					"name": "new_client",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"client_name\": \"Messi\",\n    \"birth_date\": \"1987-06-24\",\n    \"document_number\": \"12345678\",\n    \"country\": \"Argentina\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:8080/new_client",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "8080",
+							"path": [
+								"new_client"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "new_debit_transaction",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"client_id\": \"019f638e-7a7b-7f91-b499-9e5328884710\",\n    \"debit_amount\": 0.005\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:8080/new_debit_transaction",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "8080",
+							"path": [
+								"new_debit_transaction"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "new_credit_transaction",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"client_id\": \"019f62d3-149b-7d70-928b-cb411c6560a2\",\n    \"credit_amount\": 12.107\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:8080/new_credit_transaction",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "8080",
+							"path": [
+								"new_credit_transaction"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "get_balance",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:8080/get_balance?client_id=019f62d3-149b-7d70-928b-cb411c6560a2",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "8080",
+							"path": [
+								"get_balance"
+							],
+							"query": [
+								{
+									"key": "client_id",
+									"value": "019f62d3-149b-7d70-928b-cb411c6560a2"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "store_balances",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:8080/store_balances",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "8080",
+							"path": [
+								"store_balances"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Errors",
+			"item": [
+				{
+					"name": "new_debit bad_amount",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"client_id\": \"019f638e-7a7b-7f91-b499-9e5328884710\",\n    \"debit_amount\": 0.00005\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:8080/new_debit_transaction",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "8080",
+							"path": [
+								"new_debit_transaction"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "new_debit bad_amount 2",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"client_id\": \"019f638e-7a7b-7f91-b499-9e5328884710\",\n    \"debit_amount\": -5\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:8080/new_debit_transaction",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "8080",
+							"path": [
+								"new_debit_transaction"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "new_client bad_country",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"client_name\": \"Lucas\",\n    \"birth_date\": \"1997-11-01\",\n    \"document_number\": \"12345115\",\n    \"country\": \"Bolivia\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:8080/new_client",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "8080",
+							"path": [
+								"new_client"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "new_client bad_doc",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"client_name\": \"Lucas\",\n    \"birth_date\": \"1997-11-01\",\n    \"document_number\": \"123451105\",\n    \"country\": \"Argentina\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:8080/new_client",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "8080",
+							"path": [
+								"new_client"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "new_client bad_doc 2",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"client_name\": \"Lucas\",\n    \"birth_date\": \"1997-11-01\",\n    \"document_number\": \"11a11111\",\n    \"country\": \"Argentina\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:8080/new_client",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "8080",
+							"path": [
+								"new_client"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		}
+	],
+	"variable": [
+		{
+			"key": "client_id",
+			"value": ""
+		}
+	]
+}
