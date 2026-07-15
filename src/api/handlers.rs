@@ -37,7 +37,10 @@ pub async fn new_client(
         return Err(e);
     }
 
+    // Insert the client into the cache
     cache.insert_client(&client).await;
+
+    // Release the document number
     cache.release_document(&document_number).await;
 
     Ok(HttpResponse::Ok().json(client.client_id.to_string()))
@@ -47,7 +50,7 @@ pub async fn new_client(
 /// balances  to zero in memory.
 #[post("/store_balances")]
 pub async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder, AppError> {
-    // Serializes this whole flow (snapshot, disk write, flush) against any other
+    // Serializes this whole flow (snapshot, disk write, cache update) against any other
     // concurrent call to this same endpoint. Without it, two overlaping calls
     // could race to write the same data.
     let _store_guard = cache.persistence_lock.lock().await;

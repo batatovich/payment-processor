@@ -100,9 +100,6 @@ impl Cache {
     /// recording its document number in the duplicate-detection index.
     pub async fn insert_client(&self, client: &Client) {
         let mut clients = self.clients.write().await;
-        let mut documents = self.registered_documents.write().await;
-
-        documents.insert(client.details.document_number.clone());
         clients.insert(
             client.client_id,
             ClientState {
@@ -110,6 +107,10 @@ impl Cache {
                 balance: Mutex::new(Decimal::ZERO),
             },
         );
+
+        // Note that we hold the write lock on the clients map until we've recorded the document number.
+        let mut documents = self.registered_documents.write().await;
+        documents.insert(client.details.document_number.clone());
     }
 }
 
@@ -126,10 +127,11 @@ impl Cache {
         amount: Decimal,
         direction: TransactionDirection,
     ) -> Result<Decimal, AppError> {
-        // Read lock keeps the map stable, only registration takes the write lock
+        // Acquire a read lock on the clients map
         let clients = self.clients.read().await;
         let client_state = clients.get(&client_id).ok_or(AppError::ClientNotFound)?;
 
+        // Acquire a lock on the client's balance mutex and update the balance
         let new_balance = {
             let mut balance = client_state.balance.lock().await;
             match direction {
@@ -167,7 +169,7 @@ impl Cache {
     ///   - if it lands before this snapshot reads that client's balance, the
     ///     newer value is captured and persited this round;
     ///   - if it lands after, this snapshot captured the older value, and
-    ///     `flush_dirty_balances` subtracts (not overwrites) the persisted
+    ///     `settle_persisted_balances` subtracts (not overwrites) the persisted
     ///     amount — leaving a non-zero remainder that keeps the client dirty
     ///     for the next round.
     /// So the result is never an inconsistent snapshot, just a choice of which round a transaction ends up in.
@@ -176,6 +178,8 @@ impl Cache {
         // Copy the dirty id set and release it's lock before touching client balances.
         let dirty_ids = self.dirty_client_ids.lock().await.clone();
 
+        // Acquire a read lock on the clients map. As mentioned above, clients balances can change from the moment
+        // we start iterating over the dirty ids until we finish.
         let clients = self.clients.read().await;
         let mut balances = Vec::with_capacity(dirty_ids.len());
         for client_id in dirty_ids {
