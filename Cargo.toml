@@ -7,9 +7,8 @@ edition = "2024"
 actix-web = "4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0.150" }
-chrono = { version = "0.4.45", features = ["serde"] } 
-uuid = { version = "1.23.4", features = ["v7", "serde"]}
-postcard = "1.1.3"
+chrono = { version = "0.4.45", features = ["serde"] }
+uuid = { version = "1.23.4", features = ["v7", "serde"] }
 tokio = { version = "1", features = ["full"] }
-rust_decimal = { version = "1.42.1", features = ["macros"] }
+rust_decimal = { version = "1.42.1" }
 thiserror = "2.0.18"
