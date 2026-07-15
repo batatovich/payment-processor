@@ -1,8 +1,7 @@
 use actix_web::{HttpResponse, Responder, get, post, web};
 
 use crate::api::dto::{
-    ClientDetails, GetBalanceRequest, GetBalanceResponse, NewCreditTransactionBody,
-    NewDebitTransaction,
+    ClientDetails, GetBalanceRequest, GetBalanceResponse, NewCreditTransaction, NewDebitTransaction,
 };
 use crate::cache::Cache;
 use crate::error::AppError;
@@ -17,6 +16,8 @@ pub async fn new_client(
     cache: web::Data<Cache>,
 ) -> Result<impl Responder, AppError> {
     let body = req_body.into_inner();
+    body.validate()?;
+
     let document_number = body.document_number.clone();
 
     if cache.is_document_in_use(&document_number).await {
@@ -76,9 +77,11 @@ pub async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder, A
 /// Credits a client's balance and returns the updated balance.
 #[post("/new_credit_transaction")]
 pub async fn new_credit_transaction(
-    req_body: web::Json<NewCreditTransactionBody>,
+    req_body: web::Json<NewCreditTransaction>,
     cache: web::Data<Cache>,
 ) -> Result<impl Responder, AppError> {
+    req_body.validate()?;
+
     let new_balance = cache
         .process_transaction(
             req_body.client_id,
@@ -96,6 +99,8 @@ pub async fn new_debit_transaction(
     req_body: web::Json<NewDebitTransaction>,
     cache: web::Data<Cache>,
 ) -> Result<impl Responder, AppError> {
+    req_body.validate()?;
+
     let new_balance = cache
         .process_transaction(
             req_body.client_id,

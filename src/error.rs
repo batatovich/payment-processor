@@ -8,6 +8,9 @@ pub enum AppError {
     #[error("Client not found")]
     ClientNotFound,
 
+    #[error("Invalid request: {0}")]
+    Validation(String),
+
     #[error("A client with that document already exists")]
     DocumentInUse,
 
@@ -30,6 +33,7 @@ impl ResponseError for AppError {
     fn status_code(&self) -> StatusCode {
         match self {
             AppError::ClientNotFound => StatusCode::NOT_FOUND,
+            AppError::Validation(_) => StatusCode::BAD_REQUEST,
             AppError::DocumentInUse | AppError::DocumentInFlight => StatusCode::CONFLICT,
             AppError::Io(_) | AppError::Serde(_) | AppError::Bootstrap(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
