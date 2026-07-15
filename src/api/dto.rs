@@ -9,6 +9,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// new_client body
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientDetails {
@@ -28,6 +29,7 @@ impl ClientDetails {
     }
 }
 
+/// new_credit_transaction body
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewCreditTransaction {
@@ -41,6 +43,7 @@ impl NewCreditTransaction {
     }
 }
 
+/// new_debit_transaction body
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewDebitTransaction {
@@ -54,12 +57,14 @@ impl NewDebitTransaction {
     }
 }
 
+/// get_balance params
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GetBalanceRequest {
     pub client_id: Uuid,
 }
 
+/// get_balance response
 #[derive(Serialize)]
 pub struct GetBalanceResponse {
     pub client_id: Uuid,
