@@ -8,7 +8,7 @@ use tokio::fs;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use uuid::Uuid;
 
-/// Appends a client as a JSON line to the clients metadata ledger.
+/// Appends a client as a JSON line to the clients metadata ledger
 pub async fn save_client_to_storage(client: &Client) -> Result<(), AppError> {
     let mut serialized = serde_json::to_string(client)?;
     serialized.push('\n');
@@ -29,7 +29,7 @@ pub async fn save_client_to_storage(client: &Client) -> Result<(), AppError> {
 /// Line format: `{client_id} {balance}` (balances may be negative)
 ///
 /// Data is written to a `.tmp` file, fsynced, and then atomically renamed into
-/// place so a crash can never leave a partially written balance file behind.
+/// place so a crash can never leave a partialy written balance file behind.
 pub async fn save_balances(nonce: i32, balances: &[(Uuid, Decimal)]) -> Result<(), AppError> {
     let mut buf = String::new();
     for (client_id, balance) in balances {

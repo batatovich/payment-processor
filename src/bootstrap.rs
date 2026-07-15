@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 ///
 /// Client balances always start at zero on boot.
 /// The existing balance files are scanned only to recover the next nonce so new
-/// writes don't collide with prior ones.
+/// writes dont collide with prior ones.
 pub fn run() -> Result<Cache, AppError> {
     println!("Bootstrapping system state...");
     let path = Path::new(DATA_DIR);
@@ -43,7 +43,7 @@ fn init_directory(base_path: &Path, clients_path: &Path) -> Result<(), AppError>
 }
 
 /// Single-pass directory scan collecting balance files by nonce. Any orphan
-/// `.tmp` file (an interrupted write) aborts boot.
+/// `.tmp` file (an interupted write) aborts boot.
 fn scan_balance_files(path: &Path) -> Result<HashMap<u32, PathBuf>, AppError> {
     let entries = fs::read_dir(path)
         .map_err(|e| AppError::Bootstrap(format!("Failed to read data directory: {e}")))?;
@@ -79,7 +79,7 @@ fn scan_balance_files(path: &Path) -> Result<HashMap<u32, PathBuf>, AppError> {
 }
 
 /// Validates that nonces form an unbroken, non-duplicate `1..=N` sequence.
-/// Returns `N`, or `0` if there are no balance files yet.
+/// Returns `N`, or `0` if there are no balance files yet
 fn validate_nonce_sequence(mut nonces: Vec<u32>) -> Result<u32, AppError> {
     nonces.sort_unstable();
 
@@ -97,7 +97,7 @@ fn validate_nonce_sequence(mut nonces: Vec<u32>) -> Result<u32, AppError> {
 
 /// Reads the append-only client metadata ledger (name, document, etc) and builds
 /// the in-memory cache map, seeding every client with a zero balance — balances
-/// always start at zero on boot.
+/// allways start at zero on boot.
 fn hydrate_clients(clients_path: &Path) -> Result<ClientsMap, AppError> {
     let content = fs::read_to_string(clients_path)
         .map_err(|e| AppError::Bootstrap(format!("Failed to read clients from storage: {e}")))?;
@@ -124,7 +124,7 @@ fn hydrate_clients(clients_path: &Path) -> Result<ClientsMap, AppError> {
     Ok(clients)
 }
 
-/// Extracts the nonce from a balance filename matching `ddmmyyyy_<nonce>.dat`.
+/// Extracts the nonce from a balance filename matching `ddmmyyyy_<nonce>.dat`
 fn extract_nonce_from_filename(file_path: &Path) -> Option<u32> {
     let stem = file_path.file_stem()?.to_str()?;
     let (date_str, counter_str) = stem.split_once('_')?;

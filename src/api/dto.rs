@@ -19,7 +19,7 @@ pub struct ClientDetails {
 }
 
 impl ClientDetails {
-    /// Rejects malformed client data before it is ever persisted.
+    /// Rejects malformed client data before it is ever persited.
     pub fn validate(&self) -> Result<(), AppError> {
         validate_client_name(&self.client_name)?;
         validate_document_number(&self.document_number)?;
@@ -68,7 +68,7 @@ pub struct GetBalanceResponse {
 }
 
 /// Validates a client's name: non-blank, within the length cap, and free of
-/// control characters.
+/// control caracters.
 fn validate_client_name(name: &str) -> Result<(), AppError> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -87,7 +87,7 @@ fn validate_client_name(name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Validates a document number's format: digits only within the allowed length.
+/// Validates a document number's format: digits only within the allowed length
 fn validate_document_number(document: &Document) -> Result<(), AppError> {
     let len = document.len();
     if len != DOCUMENT_LEN {
@@ -119,7 +119,7 @@ fn validate_birth_date(birth_date: NaiveDate) -> Result<(), AppError> {
         )));
     }
 
-    // Age in whole years: subtract one if this year's birthday hasn't happened yet.
+    // Age in whole years: subtract one if this year's birthday hasnt happened yet.
     let mut age = today.year() - birth_date.year();
     if (today.month(), today.day()) < (birth_date.month(), birth_date.day()) {
         age -= 1;
@@ -133,7 +133,7 @@ fn validate_birth_date(birth_date: NaiveDate) -> Result<(), AppError> {
 }
 
 /// Validates a transaction amount: strictly positive, no more than the allowed
-/// number of decimal places, and within the per-transaction cap.
+/// number of decimal places, and within the per-transaction  cap.
 fn validate_amount(amount: Decimal) -> Result<(), AppError> {
     if amount <= Decimal::ZERO {
         return Err(AppError::Validation("Amount must be positive".into()));

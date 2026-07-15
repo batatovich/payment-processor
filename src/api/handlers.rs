@@ -9,7 +9,7 @@ use crate::model::{Client, TransactionDirection};
 use crate::storage;
 
 /// Registers a new client: rejects duplicate documents, persists the client to
-/// storage, and only then adds it to the in-memory cache.
+/// storage, and only then adds it to the in-memory cache
 #[post("/new_client")]
 pub async fn new_client(
     req_body: web::Json<ClientDetails>,
@@ -24,14 +24,14 @@ pub async fn new_client(
         return Err(AppError::DocumentInUse);
     }
 
-    // Reserve the document so a concurrent sign-up on the same number is rejected
+    // Reserve the document so a concurent sign-up on the same number is rejected
     // while this one is still being persisted (it isn't in the cache yet).
     cache.reserve_document(&document_number).await?;
 
     let client = Client::new(body);
 
     // Persist first, then publish to the cache. On write failure the reservation
-    // is released and the client is never made visible, so the call can be retried.
+    // is released and the client is never made visible so the call can be retried.
     if let Err(e) = storage::save_client_to_storage(&client).await {
         cache.release_document(&document_number).await;
         return Err(e);
@@ -44,31 +44,36 @@ pub async fn new_client(
 }
 
 /// Flushes the balances of all dirty clients to a storage file, then resets those
-/// balances to zero in memory.
+/// balances  to zero in memory.
 #[post("/store_balances")]
 pub async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder, AppError> {
-    // Lock the store guard.
-    // The lock is released when the function returns,
-    // and only there can another task try to store balances again.
+    // Serializes this whole flow (snapshot, disk write, flush) against any other
+    // concurrent call to this same endpoint. Without it, two overlaping calls
+    // could race to write the same data.
     let _store_guard = cache.persistence_lock.lock().await;
 
     // Snapshot the balances of dirty clients to persist.
     let balances = cache.snapshot_dirty_balances().await;
 
-    // Early return if there's nothing new to write.
+    // Nothing changed since the last call - avoid writing an empty file and
+    // burning a nonce for no reason
     if balances.is_empty() {
         return Ok(HttpResponse::Ok().finish());
     }
 
     let nonce = cache.get_nonce() + 1;
 
-    // Write the file recording this batch of balances. Once persisted, the flushed
-    // balances are reset to zero in memory.
-    // If this fails, the cache was never modified and the operation can be retried.
+    // Write first, mutate cache state second: if this fails, nothing in memory
+    // has changed yet, so the client can safely retry the call.
     storage::save_balances(nonce, &balances).await?;
 
-    cache.flush_balances(&balances).await;
+    // Subtracts the persisted amounts rather than zeroing outright, so any
+    // transaction that landed after the snapshot above stays dirty and is
+    // picked up by the next call instead of being silently droped.
+    cache.settle_persisted_balances(&balances).await;
 
+    // Only advance the nonce after the write suceeds, so a failed write never
+    // leaves a gap in the nonce sequence.
     cache.increment_nonce();
 
     Ok(HttpResponse::Ok().finish())
@@ -93,7 +98,7 @@ pub async fn new_credit_transaction(
     Ok(HttpResponse::Ok().json(new_balance))
 }
 
-/// Debits a client's balance (may go negative) and returns the updated balance.
+/// Debits a client's balance (may go negative) and returns the updated balance
 #[post("/new_debit_transaction")]
 pub async fn new_debit_transaction(
     req_body: web::Json<NewDebitTransaction>,

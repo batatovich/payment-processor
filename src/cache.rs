@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
-/// In-memory state of a single registered client.
+/// In-memory state of a single  registerd client.
 pub struct ClientState {
     pub details: ClientDetails,
     /// The client's running balance. Starts at zero on boot, accumulates credits
@@ -21,25 +21,29 @@ pub type ClientsMap = HashMap<Uuid, ClientState>;
 
 /// Shared application state, accessed concurrently by every request handler.
 pub struct Cache {
-    /// The latest nonce successfully committed to storage.
+    /// The latest nonce succesfully commited to storage.
     latest_nonce: AtomicI32,
 
     /// In-memory registry of all clients.
-    /// Read-lock for balance queries and existence checks; write-lock only to register new clients.
+    /// Read-lock for balance queries, transactions, and dirty-balance
+    /// snapshots ]
+    /// Write-lock only to register a new client.
     clients: RwLock<ClientsMap>,
 
     /// Document numbers of all registered clients, kept in sync with `clients`.
-    /// Enables faster duplicate detection without scanning the whole registry.
+    /// Enables faster duplicate detection wihtout scanning the whole registry.
     registered_documents: RwLock<HashSet<Document>>,
 
     /// Unique document numbers currently undergoing registration.
-    /// Prevents duplicate sign-up race conditions before they are persisted.
+    /// Prevents duplicate sign-up race conditions before they're persited.
     pending_registrations: Mutex<HashSet<Document>>,
 
     /// Client IDs with balance changes waiting to be flushed.
     dirty_client_ids: Mutex<HashSet<Uuid>>,
 
-    /// Guards writing operations to prevent races.
+    /// Serializes `store_balances` calls end-to-end, held by the handler for the whole operation.
+    ///
+    /// This is done to prevent concurrent execution of `store_balances`.
     pub persistence_lock: Mutex<()>,
 }
 
@@ -62,7 +66,7 @@ impl Cache {
     }
 }
 
-// Client registration
+// client registration
 impl Cache {
     /// Returns whether a document number already belongs to a registered client.
     pub async fn is_document_in_use(&self, document_number: &Document) -> bool {
@@ -113,13 +117,16 @@ impl Cache {
 impl Cache {
     /// Applies a credit or debit to a client's balance and returns the resulting
     /// balance. Debits are always accepted and may drive the balance negative.
+    ///
+    /// Runs fully concurrently with other transactions (different clients
+    /// never contend).
     pub async fn process_transaction(
         &self,
         client_id: Uuid,
         amount: Decimal,
         direction: TransactionDirection,
     ) -> Result<Decimal, AppError> {
-        // Read lock keeps the map stable; only registration takes the write lock.
+        // Read lock keeps the map stable, only registration takes the write lock
         let clients = self.clients.read().await;
         let client_state = clients.get(&client_id).ok_or(AppError::ClientNotFound)?;
 
@@ -131,6 +138,9 @@ impl Cache {
             }
             *balance
         };
+
+        // droped the client guard
+        drop(clients);
 
         self.mark_dirty(client_id).await;
         Ok(new_balance)
@@ -146,11 +156,24 @@ impl Cache {
     }
 }
 
-// Persistence / flush
+// Balance persistence
 impl Cache {
     /// Snapshots the current balance of every dirty client.
+    ///
+    /// Uses a plain read lock and is NOT exclusive against `process_transaction`:
+    /// A transaction may land on a client while this loop is mid-copy. That's
+    /// deliberately allowed rather than guarded against, because it can't lose
+    /// or double-count a transaction either way:
+    ///   - if it lands before this snapshot reads that client's balance, the
+    ///     newer value is captured and persited this round;
+    ///   - if it lands after, this snapshot captured the older value, and
+    ///     `flush_dirty_balances` subtracts (not overwrites) the persisted
+    ///     amount — leaving a non-zero remainder that keeps the client dirty
+    ///     for the next round.
+    /// So the result is never an inconsistent snapshot, just a choice of which round a transaction ends up in.
+    /// Trading strict point-in-time atomicity for zero transaction blocking during `store_balances` execution.
     pub async fn snapshot_dirty_balances(&self) -> Vec<(Uuid, Decimal)> {
-        // Copy the dirty id set and release its lock before touching client balances.
+        // Copy the dirty id set and release it's lock before touching client balances.
         let dirty_ids = self.dirty_client_ids.lock().await.clone();
 
         let clients = self.clients.read().await;
@@ -167,7 +190,10 @@ impl Cache {
     /// Flushes dirty clients balances, subtracting the persisted amount (rather than hard-setting to
     /// zero), which preserves any transaction that landed after the snapshot was taken;
     /// such a client stays dirty for the next flush.
-    pub async fn flush_balances(&self, persisted_balances: &[(Uuid, Decimal)]) {
+    ///
+    /// This subtract-not-overwrite behavior is what makes the relaxed
+    /// (non-exclusive) locking in `snapshot_dirty_balances` work.
+    pub async fn settle_persisted_balances(&self, persisted_balances: &[(Uuid, Decimal)]) {
         let clients = self.clients.read().await;
         let mut dirty_ids = self.dirty_client_ids.lock().await;
 
@@ -187,7 +213,7 @@ impl Cache {
         }
     }
 
-    /// Flags a client as having in-memory changes awaiting persistence.
+    /// Flags a client as having in-memory changes awaiting persistance.
     async fn mark_dirty(&self, client_id: Uuid) {
         self.dirty_client_ids.lock().await.insert(client_id);
     }

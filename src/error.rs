@@ -2,7 +2,7 @@ use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 use serde_json::json;
 use thiserror::Error;
 
-/// Central application error type.
+/// Central application error type
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("Client not found")]
@@ -28,7 +28,7 @@ pub enum AppError {
     Bootstrap(String),
 }
 
-// Implement the ResponseError trait to convert the AppError into an Actix error
+// Implement the ResponseError trait to convert the AppError into an Actix error.
 impl ResponseError for AppError {
     fn status_code(&self) -> StatusCode {
         match self {
