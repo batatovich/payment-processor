@@ -1,4 +1,4 @@
-use crate::api::dto::NewClientBody as ClientDetails;
+use crate::api::dto::ClientDetails;
 use crate::error::AppError;
 use crate::model::{Client, Document, TransactionDirection};
 use rust_decimal::Decimal;
@@ -29,7 +29,7 @@ pub struct Cache {
     clients: RwLock<ClientsMap>,
 
     /// Document numbers of all registered clients, kept in sync with `clients`.
-    /// Enables O(1) duplicate detection without scanning the whole registry.
+    /// Enables faster duplicate detection without scanning the whole registry.
     registered_documents: RwLock<HashSet<Document>>,
 
     /// Unique document numbers currently undergoing registration.
@@ -39,7 +39,7 @@ pub struct Cache {
     /// Client IDs with balance changes waiting to be flushed.
     dirty_client_ids: Mutex<HashSet<Uuid>>,
 
-    /// Serializes writing operations to guarantee atomic updates and prevent races.
+    /// Guards writing operations to prevent races.
     pub persistence_lock: Mutex<()>,
 }
 
@@ -113,7 +113,7 @@ impl Cache {
 impl Cache {
     /// Applies a credit or debit to a client's balance and returns the resulting
     /// balance. Debits are always accepted and may drive the balance negative.
-    pub async fn apply_balance_change(
+    pub async fn process_transaction(
         &self,
         client_id: Uuid,
         amount: Decimal,
@@ -136,20 +136,19 @@ impl Cache {
         Ok(new_balance)
     }
 
-    /// Returns the client's document number and current balance.
-    pub async fn get_client_state(&self, client_id: Uuid) -> Result<(Document, Decimal), AppError> {
+    /// Returns the client's details and current balance.
+    pub async fn get_client(&self, client_id: Uuid) -> Result<(ClientDetails, Decimal), AppError> {
         let clients = self.clients.read().await;
         let client_state = clients.get(&client_id).ok_or(AppError::ClientNotFound)?;
 
         let balance = *client_state.balance.lock().await;
-        Ok((client_state.details.document_number.clone(), balance))
+        Ok((client_state.details.clone(), balance))
     }
 }
 
 // Persistence / flush
 impl Cache {
-    /// Snapshots the current balance of every dirty client, producing the batch to
-    /// be written to the next balance file.
+    /// Snapshots the current balance of every dirty client.
     pub async fn snapshot_dirty_balances(&self) -> Vec<(Uuid, Decimal)> {
         // Copy the dirty id set and release its lock before touching client balances.
         let dirty_ids = self.dirty_client_ids.lock().await.clone();
@@ -165,11 +164,10 @@ impl Cache {
         balances
     }
 
-    /// Resets each persisted balance back to zero, clearing the client from the
-    /// dirty set. Subtracting the persisted amount (rather than hard-setting to
-    /// zero) preserves any transaction that landed after the snapshot was taken;
+    /// Flushes dirty clients balances, subtracting the persisted amount (rather than hard-setting to
+    /// zero), which preserves any transaction that landed after the snapshot was taken;
     /// such a client stays dirty for the next flush.
-    pub async fn reset_persisted_balances(&self, persisted_balances: &[(Uuid, Decimal)]) {
+    pub async fn flush_balances(&self, persisted_balances: &[(Uuid, Decimal)]) {
         let clients = self.clients.read().await;
         let mut dirty_ids = self.dirty_client_ids.lock().await;
 

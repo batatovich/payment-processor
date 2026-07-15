@@ -1,4 +1,4 @@
-use crate::api::dto::NewClientBody;
+use crate::api::dto::ClientDetails;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -20,11 +20,11 @@ pub enum Country {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Client {
     pub client_id: Uuid,
-    pub details: NewClientBody,
+    pub details: ClientDetails,
 }
 
 impl Client {
-    pub fn new(details: NewClientBody) -> Self {
+    pub fn new(details: ClientDetails) -> Self {
         Self {
             client_id: Uuid::now_v7(),
             details,

@@ -1,33 +1,19 @@
 use actix_web::{HttpResponse, Responder, get, post, web};
 
 use crate::api::dto::{
-    GetBalanceQuery, GetBalanceResponse, NewClientBody, NewCreditTransactionBody,
-    NewDebitTransactionBody,
+    ClientDetails, GetBalanceRequest, GetBalanceResponse, NewCreditTransactionBody,
+    NewDebitTransaction,
 };
 use crate::cache::Cache;
 use crate::error::AppError;
 use crate::model::{Client, TransactionDirection};
 use crate::storage;
 
-/// Lists the available API endpoints.
-#[get("/")]
-pub async fn index() -> impl Responder {
-    let endpoints = [
-        ("POST /new_client", "Register a new client"),
-        ("POST /new_credit_transaction", "Record a credit deposit"),
-        ("POST /new_debit_transaction", "Record a debit withdrawal"),
-        ("POST /store_balances", "Persist current client balances"),
-        ("GET /get_balance", "Retrieve a client's current balance"),
-    ];
-
-    HttpResponse::Ok().json(endpoints)
-}
-
 /// Registers a new client: rejects duplicate documents, persists the client to
 /// storage, and only then adds it to the in-memory cache.
 #[post("/new_client")]
 pub async fn new_client(
-    req_body: web::Json<NewClientBody>,
+    req_body: web::Json<ClientDetails>,
     cache: web::Data<Cache>,
 ) -> Result<impl Responder, AppError> {
     let body = req_body.into_inner();
@@ -80,7 +66,7 @@ pub async fn store_balances(cache: web::Data<Cache>) -> Result<impl Responder, A
     // If this fails, the cache was never modified and the operation can be retried.
     storage::save_balances(nonce, &balances).await?;
 
-    cache.reset_persisted_balances(&balances).await;
+    cache.flush_balances(&balances).await;
 
     cache.increment_nonce();
 
@@ -94,7 +80,7 @@ pub async fn new_credit_transaction(
     cache: web::Data<Cache>,
 ) -> Result<impl Responder, AppError> {
     let new_balance = cache
-        .apply_balance_change(
+        .process_transaction(
             req_body.client_id,
             req_body.credit_amount,
             TransactionDirection::Credit,
@@ -107,11 +93,11 @@ pub async fn new_credit_transaction(
 /// Debits a client's balance (may go negative) and returns the updated balance.
 #[post("/new_debit_transaction")]
 pub async fn new_debit_transaction(
-    req_body: web::Json<NewDebitTransactionBody>,
+    req_body: web::Json<NewDebitTransaction>,
     cache: web::Data<Cache>,
 ) -> Result<impl Responder, AppError> {
     let new_balance = cache
-        .apply_balance_change(
+        .process_transaction(
             req_body.client_id,
             req_body.debit_amount,
             TransactionDirection::Debit,
@@ -124,16 +110,16 @@ pub async fn new_debit_transaction(
 /// Returns a client's document number and current balance.
 #[get("/get_balance")]
 pub async fn get_balance(
-    query: web::Query<GetBalanceQuery>,
+    query: web::Query<GetBalanceRequest>,
     cache: web::Data<Cache>,
 ) -> Result<impl Responder, AppError> {
     let client_id = query.client_id;
 
-    let (document_number, balance) = cache.get_client_state(client_id).await?;
+    let (details, balance) = cache.get_client(client_id).await?;
 
     Ok(HttpResponse::Ok().json(GetBalanceResponse {
         client_id,
-        document_number,
+        details,
         balance,
     }))
 }

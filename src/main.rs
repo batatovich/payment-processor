@@ -9,7 +9,7 @@ mod storage;
 use actix_web::{App, HttpServer, web};
 
 use crate::api::handlers::{
-    get_balance, index, new_client, new_credit_transaction, new_debit_transaction, store_balances,
+    get_balance, new_client, new_credit_transaction, new_debit_transaction, store_balances,
 };
 use crate::constants::{SERVER_HOST, SERVER_PORT};
 
@@ -25,7 +25,6 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(cache.clone())
-            .service(index)
             .service(new_client)
             .service(new_debit_transaction)
             .service(new_credit_transaction)

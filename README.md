@@ -1,6 +1,7 @@
 # payment-processor
 
-A small HTTP payment/ledger service in Rust. It registers clients and tracks their running balances in memory, periodically flushing them to disk.
+A little HTTP payment/ledger service written in Rust. It signs up clients, keeps their running balances in memory and saves them to a dedicated file if needed.
+
 ## Stack
 
 - **[actix-web](https://actix.rs/)** — HTTP server
@@ -22,12 +23,13 @@ Server binds to `127.0.0.1:8080` (see `src/constants.rs`). State is persisted un
 
 | Method & Path                 | Description                              |
 | ----------------------------- | ---------------------------------------- |
-| `GET  /`                      | List available endpoints                 |
 | `POST /new_client`            | Register a new client, returns client ID |
 | `POST /new_credit_transaction`| Credit a client's balance                |
 | `POST /new_debit_transaction` | Debit a client's balance (may go negative)|
 | `POST /store_balances`        | Flush dirty balances to disk             |
-| `GET  /get_balance`           | Read a client's document number & balance |
+| `GET  /get_balance`           | Read a client's document number & current balance |
+
+`GET /get_balance` gives you the **current in-memory balance**, not the client's net/lifetime balance. Because a flush zeroes out what it persists, the number you get back is only what has piled up since the last `store_balances`.
 
 ## Layout
 
@@ -45,18 +47,18 @@ src/
   constants.rs    Config constants (host, port, paths)
 ```
 
-## Core architectural decisions
+## The interesting bits (a.k.a. why it's built this way)
 
-- **In-memory first, disk second.** Balances live in `Cache` and are mutated per request; durability comes from explicit `store_balances` flushes rather than a write per transaction. This keeps transaction handling fast at the cost of requiring periodic flushes.
+- **In-memory first, disk second.** Balances live in `Cache` and get bumped on every request; durability comes from explicit `store_balances` flushes instead of a write per transaction.
 
-- **Balances reset to zero on boot.** On startup only client *metadata* is rehydrated; balances always start at zero (`bootstrap.rs`).
+- **Balances reset to zero on boot.** On startup only client *metadata* gets rehydrated — balances always come back up at zero (`bootstrap.rs`).
 
-- **Crash-safe writes.** Balance files are written to a `.tmp` file, `fsync`ed, then atomically renamed into place, so a crash never leaves a half-written file. An orphan `.tmp` found at boot aborts startup. Client metadata is an append-only JSON-lines ledger.
+- **Crash-safe writes.** Balance files get written to a `.tmp` file, `fsync`ed, then atomically renamed into place, so a crash can't leave a half-written file lying around. If an orphan `.tmp` shows up at boot, startup bails. Client metadata is a plain append-only JSON-lines ledger.
 
-- **Monotonic nonce sequence.** Each flush produces a `ddmmyyyy_<nonce>.dat` file. At boot the files must form an unbroken `1..=N` sequence; gaps, duplicates, or orphan temp files fail the boot, giving a simple integrity check over the persisted history.
+- **Monotonic nonce sequence.** Every flush spits out a `ddmmyyyy_<nonce>.dat` file. At boot those files have to form an unbroken `1..=N` sequence — any gaps, duplicates, or orphan temp files and boot refuses to start. Cheap little integrity check over the whole history.
 
-- **Dirty tracking + non-destructive flush.** Only clients with unpersisted changes are flushed. After writing, persisted amounts are *subtracted* (not hard-set to zero) so a transaction landing mid-flush is preserved and the client stays dirty for the next round.
+- **Dirty tracking + non-destructive flush.** Only clients with unsaved changes get flushed. After writing, the persisted amount is *subtracted* rather than hard-set to zero, so a transaction that sneaks in mid-flush isn't lost and the client just stays dirty for the next round.
 
-- **Concurrency.** An `RwLock` guards the client map (read for balance ops, write only for registration); each balance sits behind its own `Mutex`; a dedicated `persistence_lock` serializes flushes; and `pending_registrations` guards against two concurrent sign-ups racing on the same document number before either is persisted.
+- **Concurrency.** An `RwLock` guards the client map (read for balance ops, write only for registration); each balance sits behind its own `Mutex`; a dedicated `persistence_lock` serializes flushes; and `pending_registrations` stops two concurrent sign-ups from racing on the same document number before either one is persisted.
 
-- **Persist-then-publish client registration.** A new client is written to storage *before* being added to the cache. If the write fails, the document reservation is released and the client is never made visible, so the request can be safely retried.
+- **Persist-then-publish registration.** A new client hits storage *before* it's added to the cache. If the write fails, the document reservation is released and the client never becomes visible — so you can just retry.
