@@ -46,19 +46,18 @@ src/
   error.rs        AppError + HTTP status mapping
   constants.rs    Config constants (host, port, paths)
 ```
+## Design notes
 
-## The interesting bits (a.k.a. why it's built this way)
+**In-memory first, disk second.** Balances live in `Cache` and update on every request. Durability comes from explicit `store_balances` calls rather than writing to disk on every transaction.
 
-- **In-memory first, disk second.** Balances live in `Cache` and get bumped on every request; durability comes from explicit `store_balances` flushes instead of a write per transaction.
+**Balances start at zero on boot.** Only client metadata is rehydrated at startup (`bootstrap.rs`) — balances aren't restored from previous runs, they always begin at zero.
 
-- **Balances reset to zero on boot.** On startup only client *metadata* gets rehydrated — balances always come back up at zero (`bootstrap.rs`).
+**Crash-safe writes.** Balance files are written to a `.tmp` path, fsynced, then renamed into place, so a crash mid-write can't leave a corrupt file behind. If an orphan `.tmp` file is found at boot, startup fails rather than guessing what happened. Client metadata, by contrast, is a plain append-only JSON-lines file.
 
-- **Crash-safe writes.** Balance files get written to a `.tmp` file, `fsync`ed, then atomically renamed into place, so a crash can't leave a half-written file lying around. If an orphan `.tmp` shows up at boot, startup bails. Client metadata is a plain append-only JSON-lines ledger.
+**Nonce sequence has to be unbroken.** Each flush produces a `ddmmyyyy_<nonce>.dat` file. At boot, the existing files must form a complete `1..=N` sequence with no gaps or duplicates — if they don't (or there's an orphan temp file), startup refuses to continue. It's a simple integrity check across the whole history.
 
-- **Monotonic nonce sequence.** Every flush spits out a `ddmmyyyy_<nonce>.dat` file. At boot those files have to form an unbroken `1..=N` sequence — any gaps, duplicates, or orphan temp files and boot refuses to start. Cheap little integrity check over the whole history.
+**Dirty tracking, non-destructive flush.** Only clients with unpersisted changes get written. After a flush, the persisted amount is subtracted from the in-memory balance rather than zeroing it outright — so a transaction that arrives mid-flush isn't lost, it just leaves the client dirty for next time.
 
-- **Dirty tracking + non-destructive flush.** Only clients with unsaved changes get flushed. After writing, the persisted amount is *subtracted* rather than hard-set to zero, so a transaction that sneaks in mid-flush isn't lost and the client just stays dirty for the next round.
+**Concurrency.** The client map sits behind an `RwLock` (read for balance operations, write only for registering a new client), each client's balance has its own `Mutex`, a `persistence_lock` serializes `store_balances` calls, and `pending_registrations` prevents two concurrent sign-ups from racing on the same document number before either is persisted.
 
-- **Concurrency.** An `RwLock` guards the client map (read for balance ops, write only for registration); each balance sits behind its own `Mutex`; a dedicated `persistence_lock` serializes flushes; and `pending_registrations` stops two concurrent sign-ups from racing on the same document number before either one is persisted.
-
-- **Persist-then-publish registration.** A new client hits storage *before* it's added to the cache. If the write fails, the document reservation is released and the client never becomes visible — so you can just retry.
+**Registration writes to disk before it's visible in memory.** A new client is persisted first; only after that succeeds does it get added to the cache. If the write fails, the document reservation is released and the client never becomes visible, so the request can just be retried.
